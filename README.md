@@ -17,7 +17,7 @@ The script avoids requiring the game's `SharedModules.Networking` module because
 3. Resolve a username, queue items, optionally enter a note, and send.
 4. Press Right Shift to hide or show the interface.
 
-Re-executing automatically stops and removes the previous copy.
+Re-executing automatically stops the previous copy and removes orphaned same-name UI left by a cleared executor state or an interrupted initialization.
 
 ## Real game limits
 
