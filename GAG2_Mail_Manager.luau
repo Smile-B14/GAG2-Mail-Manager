@@ -619,16 +619,25 @@ stroke(RecipientPanel)
 label(RecipientPanel, "Recipient", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0, 24), 15, COLORS.Text)
 local UsernameBox = box(RecipientPanel, "Username", UDim2.fromOffset(12, 38), UDim2.new(1, -24, 0, 36))
 local ResolveButton = button(RecipientPanel, "Resolve username", UDim2.fromOffset(12, 82), UDim2.new(1, -24, 0, 34), COLORS.Blue)
+local AVATAR_PLACEHOLDER = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 local Avatar = new("ImageLabel", {
 	BackgroundColor3 = COLORS.Panel2,
 	Position = UDim2.new(0.5, -42, 0, 132),
 	Size = UDim2.fromOffset(84, 84),
-	Image = "rbxasset://textures/ui/GuiImagePlaceholder.png",
+	Image = AVATAR_PLACEHOLDER,
 }, RecipientPanel)
 corner(Avatar, 42)
 stroke(Avatar)
 local ResolvedName = label(RecipientPanel, "No recipient selected", UDim2.fromOffset(12, 226), UDim2.new(1, -24, 0, 44), 13, COLORS.Muted, Enum.TextXAlignment.Center)
 ResolvedName.TextWrapped = true
+
+local function resetRecipientUI(message, color)
+	State.Resolved = nil
+	Avatar.Image = AVATAR_PLACEHOLDER
+	ResolveButton.Text = "Resolve username"
+	ResolvedName.Text = message or "No recipient selected"
+	ResolvedName.TextColor3 = color or COLORS.Muted
+end
 
 local LimitInfo = label(RecipientPanel,
 	"Real game limits\n\n- 20 units per mail\n- 100-character note\n- Mailbox capacity: " .. tostring(MailboxFlags.Capacity:Get()) .. "\n\nLarge queues are sent as separate 20-unit batches and stop safely if the server rejects one.",
@@ -988,18 +997,15 @@ local resolveToken = 0
 local function resolveRecipient()
 	local username = trim(UsernameBox.Text):gsub("^@", "")
 	if #username < 3 or #username > 20 or not username:match("^[%w_]+$") then
-		State.Resolved = nil
-		ResolvedName.Text = "Enter a valid Roblox username"
-		ResolvedName.TextColor3 = COLORS.Red
+		resolveToken += 1
+		resetRecipientUI("Enter a valid Roblox username", COLORS.Red)
 		setStatus("Username must be 3-20 letters, numbers, or underscores", COLORS.Red)
 		return
 	end
 	resolveToken += 1
 	local token = resolveToken
-	State.Resolved = nil
+	resetRecipientUI("Looking up @" .. username, COLORS.Muted)
 	ResolveButton.Text = "Resolving..."
-	ResolvedName.Text = "Looking up @" .. username
-	ResolvedName.TextColor3 = COLORS.Muted
 	task.spawn(function()
 		local ok, userId, displayName = pcall(function()
 			return Networking.Mailbox.LookupPlayer:Fire(username)
@@ -1007,19 +1013,17 @@ local function resolveRecipient()
 		if State.Dead or token ~= resolveToken then
 			return
 		end
-		ResolveButton.Text = "Resolve username"
 		if not ok or type(userId) ~= "number" or userId <= 0 then
-			ResolvedName.Text = "Player not found"
-			ResolvedName.TextColor3 = COLORS.Red
+			resetRecipientUI("Player not found", COLORS.Red)
 			setStatus("The game could not resolve that username", COLORS.Red)
 			return
 		end
 		if userId == LocalPlayer.UserId then
-			ResolvedName.Text = "You cannot mail yourself"
-			ResolvedName.TextColor3 = COLORS.Red
+			resetRecipientUI("You cannot mail yourself", COLORS.Red)
 			setStatus("Choose another player", COLORS.Red)
 			return
 		end
+		ResolveButton.Text = "Resolve username"
 		displayName = type(displayName) == "string" and displayName ~= "" and displayName or username
 		State.Resolved = {
 			UserId = userId,
@@ -1312,9 +1316,7 @@ track(UsernameBox.FocusLost:Connect(function(enterPressed)
 end))
 track(UsernameBox:GetPropertyChangedSignal("Text"):Connect(function()
 	resolveToken += 1
-	State.Resolved = nil
-	ResolvedName.Text = "No recipient selected"
-	ResolvedName.TextColor3 = COLORS.Muted
+	resetRecipientUI("No recipient selected", COLORS.Muted)
 end))
 track(InventorySearch:GetPropertyChangedSignal("Text"):Connect(function()
 	rebuildInventoryUI()
