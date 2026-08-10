@@ -35,7 +35,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 - Item icons in inventory, queue, and local mail history
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with automatic snapshot retry after expiry or a failed initial request
-- Automatic queued-fruit value total
+- Automatic queued-fruit value total, refreshed when fruit metadata changes or equal-count inventory swaps occur
 - Searchable session/file-backed send history with malformed-record recovery and a 250-record cap
 - Partial-send accounting and stop control
 
