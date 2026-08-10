@@ -84,7 +84,23 @@ local MailboxControllerModule = Controllers:WaitForChild("MailboxController")
 -- Roblox's own loader accepts that path form, but Delta/Solara's require hook
 -- rejects strings. Build only the packet endpoints this script needs from the
 -- underlying ModuleScript so no string require is ever executed here.
-local Packet = require(SharedModules:WaitForChild("Packet"))
+local PacketModule = SharedModules:WaitForChild("Packet")
+local Packet = require(PacketModule)
+local PacketRemote = PacketModule:WaitForChild("RemoteEvent")
+local requiredPacketNames = {
+	"MailboxSendBatch",
+	"MailboxLookupPlayer",
+	"FruitStockSnapshot",
+	"FruitStockRequest",
+}
+local packetDeadline = os.clock() + 30
+for _, packetName in ipairs(requiredPacketNames) do
+	while PacketRemote:GetAttribute(packetName) == nil and os.clock() < packetDeadline do
+		task.wait(0.05)
+	end
+	assert(PacketRemote:GetAttribute(packetName) ~= nil, "Timed out waiting for network packet: " .. packetName)
+end
+
 local Networking = {
 	Mailbox = {
 		SendBatch = Packet("MailboxSendBatch", Packet.NumberF64, Packet.Any, Packet.String):Response(Packet.Boolean8, Packet.String),
@@ -343,7 +359,7 @@ local function fruitDetails(entryValue, itemKey)
 	end
 	local formattedWeight = WeightFormat.FormatGrams(weight)
 	return string.format(
-		"%s · %s · size %s · mut %s · stock %s",
+		"%s | %s | size %s | mut %s | stock %s",
 		mutation,
 		formattedWeight,
 		formatMultiplier(size),
@@ -484,8 +500,8 @@ local Header = new("Frame", {
 }, Window)
 label(Header, "GAG2 Mail Manager", UDim2.fromOffset(16, 0), UDim2.new(0, 300, 1, 0), 17, COLORS.Text)
 local StockTimer = label(Header, "Fruit stock: loading...", UDim2.new(1, -420, 0, 0), UDim2.fromOffset(320, 48), 13, COLORS.Yellow, Enum.TextXAlignment.Right)
-local MinimizeButton = button(Header, "—", UDim2.new(1, -82, 0, 8), UDim2.fromOffset(32, 32), COLORS.Panel2)
-local CloseButton = button(Header, "×", UDim2.new(1, -42, 0, 8), UDim2.fromOffset(32, 32), COLORS.Red)
+local MinimizeButton = button(Header, "-", UDim2.new(1, -82, 0, 8), UDim2.fromOffset(32, 32), COLORS.Panel2)
+local CloseButton = button(Header, "X", UDim2.new(1, -42, 0, 8), UDim2.fromOffset(32, 32), COLORS.Red)
 
 local Nav = new("Frame", {
 	BackgroundTransparency = 1,
@@ -534,7 +550,7 @@ local ResolvedName = label(RecipientPanel, "No recipient selected", UDim2.fromOf
 ResolvedName.TextWrapped = true
 
 local LimitInfo = label(RecipientPanel,
-	"Real game limits\n\n• 20 units per mail\n• 100-character note\n• Mailbox capacity: " .. tostring(MailboxFlags.Capacity:Get()) .. "\n\nLarge queues are sent as separate 20-unit batches and stop safely if the server rejects one.",
+	"Real game limits\n\n- 20 units per mail\n- 100-character note\n- Mailbox capacity: " .. tostring(MailboxFlags.Capacity:Get()) .. "\n\nLarge queues are sent as separate 20-unit batches and stop safely if the server rejects one.",
 	UDim2.fromOffset(14, 294), UDim2.new(1, -28, 0, 190), 12, COLORS.Muted)
 LimitInfo.TextWrapped = true
 LimitInfo.TextYAlignment = Enum.TextYAlignment.Top
@@ -680,7 +696,7 @@ rebuildInventoryUI = function()
 			if item.Category == "HarvestedFruits" then
 				detail = fruitDetails(item.EntryValue, item.ItemKey) .. "\n" .. formatNumber(item.LiveValue) .. " Sheckles"
 			else
-				detail = item.Category .. " · available " .. formatNumber(remaining)
+				detail = item.Category .. " | available " .. formatNumber(remaining)
 			end
 			local detailLabel = label(row, detail, UDim2.fromOffset(78, 29), UDim2.new(1, -155, 0, 41), 10, item.Category == "HarvestedFruits" and COLORS.Green or COLORS.Muted)
 			detailLabel.TextWrapped = true
@@ -727,11 +743,11 @@ rebuildQueueUI = function()
 		nameLabel.Font = Enum.Font.GothamSemibold
 		local detail = "x" .. formatNumber(entry.Selected)
 		if entry.Category == "HarvestedFruits" then
-			detail ..= " · " .. formatNumber(fruitLiveValue(entry.EntryValue, entry.ItemKey)) .. " Sheckles"
+			detail ..= " | " .. formatNumber(fruitLiveValue(entry.EntryValue, entry.ItemKey)) .. " Sheckles"
 		end
 		label(row, detail, UDim2.fromOffset(68, 29), UDim2.new(1, -142, 0, 25), 11, COLORS.Muted)
-		local remove = button(row, "−", UDim2.new(1, -66, 0, 8), UDim2.fromOffset(27, 27), COLORS.Panel)
-		local removeAll = button(row, "×", UDim2.new(1, -34, 0, 8), UDim2.fromOffset(27, 27), COLORS.Red)
+		local remove = button(row, "-", UDim2.new(1, -66, 0, 8), UDim2.fromOffset(27, 27), COLORS.Panel)
+		local removeAll = button(row, "X", UDim2.new(1, -34, 0, 8), UDim2.fromOffset(27, 27), COLORS.Red)
 		remove.Activated:Connect(function()
 			queueRemove(entry.Key, 1)
 		end)
@@ -782,17 +798,17 @@ rebuildHistoryUI = function()
 			corner(row, 9)
 			stroke(row)
 			local when = os.date("%Y-%m-%d %H:%M", tonumber(entry.Time) or os.time())
-			local title = string.format("To %s (@%s) · %s", entry.RecipientName or "Player", entry.Username or "?", when)
+			local title = string.format("To %s (@%s) | %s", entry.RecipientName or "Player", entry.Username or "?", when)
 			local titleLabel = label(row, title, UDim2.fromOffset(12, 7), UDim2.new(1, -90, 0, 22), 13, COLORS.Text)
 			titleLabel.Font = Enum.Font.GothamSemibold
-			label(row, string.format("%s units · %s batch(es) · %s Sheckles", formatNumber(entry.Units or 0), tostring(entry.Batches or 0), formatNumber(entry.TotalValue or 0)), UDim2.fromOffset(12, 29), UDim2.new(1, -24, 0, 20), 11, COLORS.Green)
+			label(row, string.format("%s units | %s batch(es) | %s Sheckles", formatNumber(entry.Units or 0), tostring(entry.Batches or 0), formatNumber(entry.TotalValue or 0)), UDim2.fromOffset(12, 29), UDim2.new(1, -24, 0, 20), 11, COLORS.Green)
 			local summaries = {}
 			for _, item in ipairs(entry.Items or {}) do
 				summaries[#summaries + 1] = tostring(item.Name) .. " x" .. formatNumber(item.Count)
 			end
 			local summary = table.concat(summaries, ", ")
 			if entry.Note and entry.Note ~= "" then
-				summary ..= " · Note: " .. entry.Note
+				summary ..= " | Note: " .. entry.Note
 			end
 			local summaryLabel = label(row, summary, UDim2.fromOffset(12, 51), UDim2.new(1, -210, 0, 42), 11, COLORS.Muted)
 			summaryLabel.TextWrapped = true
@@ -869,7 +885,7 @@ local function resolveRecipient()
 		State.Resolved = nil
 		ResolvedName.Text = "Enter a valid Roblox username"
 		ResolvedName.TextColor3 = COLORS.Red
-		setStatus("Username must be 3–20 letters, numbers, or underscores", COLORS.Red)
+		setStatus("Username must be 3-20 letters, numbers, or underscores", COLORS.Red)
 		return
 	end
 	resolveToken += 1
@@ -1101,7 +1117,7 @@ local function beginSend()
 
 			rebuildInventoryUI()
 			rebuildQueueUI()
-			setStatus(string.format("Sent %s/%s units · batch %s/%s", formatNumber(sentUnits), formatNumber(total), formatNumber(sentBatches), formatNumber(expectedBatches)), COLORS.Yellow)
+			setStatus(string.format("Sent %s/%s units | batch %s/%s", formatNumber(sentUnits), formatNumber(total), formatNumber(sentBatches), formatNumber(expectedBatches)), COLORS.Yellow)
 			if sentUnits < total and token == State.SendToken then
 				task.wait(BATCH_DELAY)
 			end
@@ -1139,7 +1155,7 @@ track(MinimizeButton.Activated:Connect(function()
 	Nav.Visible = not minimized
 	Status.Visible = not minimized
 	Window.Size = minimized and UDim2.fromOffset(1040, 48) or UDim2.fromOffset(1040, 660)
-	MinimizeButton.Text = minimized and "+" or "—"
+	MinimizeButton.Text = minimized and "+" or "-"
 end))
 
 local dragging = false
@@ -1283,4 +1299,4 @@ rebuildInventoryUI()
 rebuildQueueUI()
 rebuildHistoryUI()
 updateStockTimer()
-setStatus("Ready · Right Shift toggles the UI", COLORS.Green)
+setStatus("Ready | Right Shift toggles the UI", COLORS.Green)
