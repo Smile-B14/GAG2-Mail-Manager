@@ -40,6 +40,9 @@ local State = {
 		LastRefreshUnix = 0,
 		CycleSeconds = 600,
 		ClockOffset = 0,
+		RequestInFlight = false,
+		NextRequestClock = 0,
+		RetrySeconds = 15,
 	},
 }
 ENV[STATE_KEY] = State
@@ -846,8 +849,9 @@ local function applyStockSnapshot(snapshot)
 	if type(snapshot) ~= "table" then
 		return
 	end
-	local entries = {}
+	-- Timing-only snapshots must not erase the last known multipliers.
 	if type(snapshot.entries) == "table" then
+		local entries = {}
 		for fruitName, entry in pairs(snapshot.entries) do
 			if type(fruitName) == "string" and type(entry) == "table" then
 				entries[fruitName] = {
@@ -856,8 +860,8 @@ local function applyStockSnapshot(snapshot)
 				}
 			end
 		end
+		State.Stock.Entries = entries
 	end
-	State.Stock.Entries = entries
 	State.Stock.LastRefreshUnix = tonumber(snapshot.lastRefreshUnix) or State.Stock.LastRefreshUnix
 	State.Stock.NextRefreshUnix = tonumber(snapshot.nextRefreshUnix) or State.Stock.NextRefreshUnix
 	State.Stock.CycleSeconds = tonumber(snapshot.cycleSeconds) or State.Stock.CycleSeconds
@@ -868,14 +872,38 @@ local function applyStockSnapshot(snapshot)
 	rebuildQueueUI()
 end
 
+local function requestStockSnapshot()
+	if State.Dead or State.Stock.RequestInFlight or os.clock() < State.Stock.NextRequestClock then
+		return
+	end
+	State.Stock.RequestInFlight = true
+	State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
+	task.spawn(function()
+		local ok, snapshot = pcall(function()
+			return Networking.FruitStock.Request:Fire()
+		end)
+		if State.Dead then
+			return
+		end
+		State.Stock.RequestInFlight = false
+		if ok then
+			applyStockSnapshot(snapshot)
+		end
+	end)
+end
+
 local function updateStockTimer()
 	local nextRefresh = State.Stock.NextRefreshUnix
 	if nextRefresh <= 0 then
-		StockTimer.Text = "Fruit stock: unavailable"
+		StockTimer.Text = State.Stock.RequestInFlight and "Fruit Price Stock: refreshing..." or "Fruit stock: unavailable"
 		return
 	end
 	local remaining = math.max(0, math.floor(nextRefresh - (os.time() + State.Stock.ClockOffset)))
-	StockTimer.Text = string.format("Fruit Price Stock refresh in %dm %02ds", remaining // 60, remaining % 60)
+	if remaining == 0 and State.Stock.RequestInFlight then
+		StockTimer.Text = "Fruit Price Stock: refreshing..."
+	else
+		StockTimer.Text = string.format("Fruit Price Stock refresh in %dm %02ds", remaining // 60, remaining % 60)
+	end
 end
 
 local resolveToken = 0
@@ -1250,18 +1278,15 @@ track(ClearHistoryButton.Activated:Connect(function()
 end))
 
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
-task.spawn(function()
-	local ok, snapshot = pcall(function()
-		return Networking.FruitStock.Request:Fire()
-	end)
-	if ok and not State.Dead then
-		applyStockSnapshot(snapshot)
-	end
-end)
+requestStockSnapshot()
 
 task.spawn(function()
 	while not State.Dead do
 		updateStockTimer()
+		local serverNow = os.time() + State.Stock.ClockOffset
+		if State.Stock.NextRefreshUnix <= serverNow then
+			requestStockSnapshot()
+		end
 		task.wait(1)
 	end
 end)
