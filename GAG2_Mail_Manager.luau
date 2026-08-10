@@ -144,6 +144,63 @@ local COLORS = {
 	Yellow = Color3.fromRGB(244, 194, 88),
 }
 
+local function safeHistoryString(value, fallback)
+	return type(value) == "string" and value or (fallback or "")
+end
+
+local function safeHistoryNumber(value, integer)
+	local number = tonumber(value)
+	if not number or number ~= number or number == math.huge or number == -math.huge then
+		return 0
+	end
+	number = math.max(0, number)
+	return integer and math.floor(number) or number
+end
+
+local function normalizeHistory(rawHistory)
+	local normalized = {}
+	if type(rawHistory) ~= "table" then
+		return normalized
+	end
+	for _, entry in ipairs(rawHistory) do
+		if #normalized >= HISTORY_LIMIT then
+			break
+		end
+		if type(entry) == "table" then
+			local items = {}
+			if type(entry.Items) == "table" then
+				for _, item in ipairs(entry.Items) do
+					if type(item) == "table" then
+						local count = safeHistoryNumber(item.Count, true)
+						if count > 0 then
+							items[#items + 1] = {
+								Name = safeHistoryString(item.Name, "Unknown item"),
+								Category = safeHistoryString(item.Category, "Unknown"),
+								Icon = safeHistoryString(item.Icon),
+								Count = count,
+								Value = safeHistoryNumber(item.Value, false),
+							}
+						end
+					end
+				end
+			end
+			normalized[#normalized + 1] = {
+				Time = safeHistoryNumber(entry.Time, true),
+				RecipientName = safeHistoryString(entry.RecipientName, "Player"),
+				Username = safeHistoryString(entry.Username, "?"),
+				UserId = safeHistoryNumber(entry.UserId, true),
+				Note = safeHistoryString(entry.Note),
+				Items = items,
+				Units = safeHistoryNumber(entry.Units, true),
+				Batches = safeHistoryNumber(entry.Batches, true),
+				TotalValue = safeHistoryNumber(entry.TotalValue, false),
+				Status = safeHistoryString(entry.Status, "Unknown"),
+			}
+		end
+	end
+	return normalized
+end
+
 local History = ENV[HISTORY_KEY]
 if type(History) ~= "table" then
 	History = {}
@@ -158,6 +215,7 @@ if type(History) ~= "table" then
 		end)
 	end
 end
+History = normalizeHistory(History)
 ENV[HISTORY_KEY] = History
 
 local function saveHistory()
