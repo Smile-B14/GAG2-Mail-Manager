@@ -1371,28 +1371,60 @@ task.spawn(function()
 	end
 end)
 
--- Replica changes do not expose a stable public signal in this build; poll the
--- authoritative local replica cheaply and rebuild only when its shape changes.
+-- Replica changes do not expose a stable public signal in this build. Include
+-- item identity and value-affecting fruit fields so equal-count swaps and
+-- in-place fruit updates cannot leave the selector or queued totals stale.
+local function inventoryFingerprint()
+	local categoryParts = {}
+	local inventory = getInventory()
+	for _, category in ipairs(MailboxItemCatalog.Categories) do
+		if category ~= "Pets" and type(inventory[category]) == "table" then
+			local itemParts = {}
+			for itemKey, value in pairs(inventory[category]) do
+				if type(value) == "table" then
+					itemParts[#itemParts + 1] = table.concat({
+						tostring(itemKey),
+						tostring(value.Id or ""),
+						tostring(value.FruitName or value.Name or ""),
+						tostring(value.Mutation or ""),
+						tostring(value.Weight or ""),
+						tostring(value.SizeMultiplier or ""),
+						tostring(value.DecayAlpha or ""),
+					}, "\30")
+				else
+					itemParts[#itemParts + 1] = tostring(itemKey) .. "\30" .. tostring(value)
+				end
+			end
+			table.sort(itemParts)
+			categoryParts[#categoryParts + 1] = category .. "\29" .. table.concat(itemParts, "\28")
+		end
+	end
+	table.sort(categoryParts)
+	return table.concat(categoryParts, "\27")
+end
+
+local function syncQueuedMetadata()
+	local currentByKey = {}
+	for _, item in ipairs(inventoryEntries()) do
+		currentByKey[item.Key] = item
+	end
+	for key, queued in pairs(State.Queue) do
+		local current = currentByKey[key]
+		if current then
+			queued.EntryValue = current.EntryValue
+			queued.DisplayName = current.DisplayName
+			queued.Icon = current.Icon
+		end
+	end
+end
+
 task.spawn(function()
 	local lastFingerprint = ""
 	while not State.Dead do
-		local parts = {}
-		local inventory = getInventory()
-		for _, category in ipairs(MailboxItemCatalog.Categories) do
-			if category ~= "Pets" and type(inventory[category]) == "table" then
-				local count = 0
-				local units = 0
-				for _, value in pairs(inventory[category]) do
-					count += 1
-					units += type(value) == "number" and value or 1
-				end
-				parts[#parts + 1] = category .. ":" .. tostring(count) .. ":" .. tostring(units)
-			end
-		end
-		table.sort(parts)
-		local fingerprint = table.concat(parts, "|")
+		local fingerprint = inventoryFingerprint()
 		if fingerprint ~= lastFingerprint then
 			lastFingerprint = fingerprint
+			syncQueuedMetadata()
 			rebuildInventoryUI()
 			rebuildQueueUI()
 		end
