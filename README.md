@@ -29,7 +29,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 
 ## Features
 
-- Username lookup and avatar preview
+- Race-safe username lookup and avatar preview that clears stale identity state when input changes
 - Mailable fruits, seeds, and all non-pet gear categories
 - Search and category filters
 - Item icons in inventory, queue, and local mail history
