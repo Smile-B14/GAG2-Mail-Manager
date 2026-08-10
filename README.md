@@ -36,7 +36,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with automatic snapshot retry after expiry or a failed initial request
 - Automatic queued-fruit value total
-- Searchable session/file-backed send history
+- Searchable session/file-backed send history with malformed-record recovery and a 250-record cap
 - Partial-send accounting and stop control
 
 The game still validates every request server-side. This script does not bypass mailbox availability, inventory ownership, per-gift limits, or recipient capacity.
