@@ -458,6 +458,26 @@ else
 	end)
 end
 
+-- Cleanup through ENV is preferred because it also stops loops and disconnects
+-- signals. This fallback removes orphaned UI left by a cleared global state or
+-- a previous copy that failed before publishing its Cleanup function.
+local function destroyStaleGuiCopies(root)
+	if typeof(root) ~= "Instance" then
+		return
+	end
+	pcall(function()
+		for _, child in ipairs(root:GetChildren()) do
+			if child:IsA("ScreenGui") and child.Name == "SmileB_GAG2MailManager" then
+				child:Destroy()
+			end
+		end
+	end)
+end
+
+destroyStaleGuiCopies(LocalPlayer:FindFirstChildOfClass("PlayerGui"))
+destroyStaleGuiCopies(GuiParent)
+destroyStaleGuiCopies(CoreGui)
+
 local ScreenGui = new("ScreenGui", {
 	Name = "SmileB_GAG2MailManager",
 	ResetOnSpawn = false,
