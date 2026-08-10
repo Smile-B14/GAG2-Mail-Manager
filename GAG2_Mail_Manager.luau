@@ -570,10 +570,24 @@ local function updateScale()
 	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
 	Scale.Scale = math.min(1, math.max(0.58, math.min((viewport.X - 24) / 1040, (viewport.Y - 24) / 660)))
 end
-updateScale()
-if workspace.CurrentCamera then
-	track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale))
+
+local viewportConnection
+local function bindViewportCamera()
+	if viewportConnection then
+		pcall(function()
+			viewportConnection:Disconnect()
+		end)
+		viewportConnection = nil
+	end
+	local camera = workspace.CurrentCamera
+	if camera then
+		viewportConnection = track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale))
+	end
+	updateScale()
 end
+
+bindViewportCamera()
+track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewportCamera))
 
 local Header = new("Frame", {
 	BackgroundColor3 = COLORS.Panel,
