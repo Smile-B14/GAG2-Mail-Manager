@@ -32,6 +32,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 - Race-safe username lookup and avatar preview that clears stale identity state when input changes
 - Mailable fruits, seeds, and all non-pet gear categories
 - Search and category filters
+- Responsive desktop/mobile scaling that rebinds when Roblox replaces the active camera
 - Item icons in inventory, queue, and local mail history
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with automatic snapshot retry after expiry or a failed initial request
