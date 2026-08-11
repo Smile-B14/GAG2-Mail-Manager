@@ -30,15 +30,15 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 
 ## Features
 
-- Race-safe username lookup and avatar preview with stale-state clearing, a bounded timeout, and late-response rejection
-- Explicit grown-fruit discovery even when the native mailbox catalog omits HarvestedFruits, plus seeds and all non-pet gear categories
+- Race-safe username lookup and avatar preview that stays hidden until a thumbnail resolves, with stale-state clearing, a bounded timeout, and late-response rejection
+- Defensive grown-fruit discovery across fruit-named replica containers and wrappers, plus seeds and all non-pet gear categories
 - Search and category filters
 - Viewport-fitting desktop/mobile scaling that rebinds when Roblox replaces the active camera
-- Draggable circular minimized mode for mouse and touch
+- Draggable circular minimized mode for mouse and touch with smooth swirl open/close transitions
 - Item icons in inventory, queue, and local mail history, with defensive item-metadata fallback when the native catalog omits a grown fruit
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with bounded request timeouts, late-response rejection, and automatic retry
-- Automatic queued-fruit value total, refreshed when fruit metadata changes or equal-count inventory swaps occur
+- Automatic selected-fruit value total using K/M/B/T-style abbreviations, refreshed when fruit metadata changes or equal-count inventory swaps occur
 - Searchable session/file-backed send history with visible outcome status, malformed-record recovery, and a 250-record cap
 - Partial-send accounting and stop control
 
