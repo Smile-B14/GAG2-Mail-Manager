@@ -879,6 +879,7 @@ local function historyMatches(entry, query)
 		tostring(entry.RecipientName or ""),
 		tostring(entry.Username or ""),
 		tostring(entry.Note or ""),
+		tostring(entry.Status or ""),
 	}
 	for _, item in ipairs(entry.Items or {}) do
 		parts[#parts + 1] = tostring(item.Name or "")
@@ -908,7 +909,9 @@ rebuildHistoryUI = function()
 			local title = string.format("To %s (@%s) | %s", entry.RecipientName or "Player", entry.Username or "?", when)
 			local titleLabel = label(row, title, UDim2.fromOffset(12, 7), UDim2.new(1, -90, 0, 22), 13, COLORS.Text)
 			titleLabel.Font = Enum.Font.GothamSemibold
-			label(row, string.format("%s units | %s batch(es) | %s Sheckles", formatNumber(entry.Units or 0), tostring(entry.Batches or 0), formatNumber(entry.TotalValue or 0)), UDim2.fromOffset(12, 29), UDim2.new(1, -24, 0, 20), 11, COLORS.Green)
+			local historyStatus = tostring(entry.Status or "Unknown")
+			local historyColor = historyStatus == "Completed" and COLORS.Green or COLORS.Yellow
+			label(row, string.format("%s units | %s batch(es) | %s Sheckles | %s", formatNumber(entry.Units or 0), tostring(entry.Batches or 0), formatNumber(entry.TotalValue or 0), historyStatus), UDim2.fromOffset(12, 29), UDim2.new(1, -24, 0, 20), 11, historyColor)
 			local summaries = {}
 			for _, item in ipairs(entry.Items or {}) do
 				summaries[#summaries + 1] = tostring(item.Name) .. " x" .. formatNumber(item.Count)
@@ -1224,6 +1227,7 @@ local function beginSend()
 		local sentItems = {}
 		local finalStatus = "Completed"
 		local failureReason = nil
+		local deliveryUncertain = false
 
 		while not State.Dead and token == State.SendToken do
 			local payload, portions = nextBatch(job)
@@ -1237,8 +1241,11 @@ local function beginSend()
 				return
 			end
 			if not ok then
-				failureReason = "Network call failed; unsent items were left in the queue"
-				finalStatus = "Stopped"
+				-- A thrown response cannot prove whether the server committed this
+				-- write. Keep the batch queued, but never describe it as unsent.
+				failureReason = "Batch response failed; delivery could not be confirmed"
+				finalStatus = "Delivery uncertain"
+				deliveryUncertain = true
 				break
 			end
 			if success ~= true then
@@ -1300,7 +1307,9 @@ local function beginSend()
 		SendButton.Text = "Send queued items"
 		SendButton.BackgroundColor3 = COLORS.Green2
 		ClearButton.Active = true
-		if failureReason then
+		if deliveryUncertain then
+			setStatus(string.format("%s. Confirm inventory or mail state before retrying; the unconfirmed batch remains queued. Confirmed sent: %s units.", failureReason, formatNumber(sentUnits)), COLORS.Red)
+		elseif failureReason then
 			setStatus(string.format("%s. Sent %s units; unsent items remain queued.", failureReason, formatNumber(sentUnits)), COLORS.Red)
 		else
 			setStatus(string.format("Finished: sent %s units in %s batches", formatNumber(sentUnits), formatNumber(sentBatches)), COLORS.Green)
