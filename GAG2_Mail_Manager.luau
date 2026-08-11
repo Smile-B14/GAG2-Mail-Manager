@@ -1036,6 +1036,7 @@ local function updateStockTimer()
 	end
 end
 
+local RECIPIENT_LOOKUP_TIMEOUT = 12
 local resolveToken = 0
 local function resolveRecipient()
 	local username = trim(UsernameBox.Text):gsub("^@", "")
@@ -1047,6 +1048,7 @@ local function resolveRecipient()
 	end
 	resolveToken += 1
 	local token = resolveToken
+	local finished = false
 	resetRecipientUI("Looking up @" .. username, COLORS.Muted)
 	ResolveButton.Text = "Resolving..."
 	task.spawn(function()
@@ -1056,6 +1058,7 @@ local function resolveRecipient()
 		if State.Dead or token ~= resolveToken then
 			return
 		end
+		finished = true
 		if not ok or type(userId) ~= "number" or userId <= 0 then
 			resetRecipientUI("Player not found", COLORS.Red)
 			setStatus("The game could not resolve that username", COLORS.Red)
@@ -1080,6 +1083,15 @@ local function resolveRecipient()
 		if imageOk and token == resolveToken and not State.Dead then
 			Avatar.Image = image
 		end
+	end)
+	task.spawn(function()
+		task.wait(RECIPIENT_LOOKUP_TIMEOUT)
+		if State.Dead or finished or token ~= resolveToken then
+			return
+		end
+		resolveToken += 1
+		resetRecipientUI("Lookup timed out", COLORS.Red)
+		setStatus("Username lookup timed out; try again", COLORS.Red)
 	end)
 end
 
