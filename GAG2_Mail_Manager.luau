@@ -133,6 +133,7 @@ local SERVER_BATCH_UNITS = 20
 local NOTE_CODEPOINT_LIMIT = 100
 local BATCH_DELAY = 1.65
 local HISTORY_LIMIT = 250
+local FRUIT_CATEGORY = "HarvestedFruits"
 
 local COLORS = {
 	Back = Color3.fromRGB(15, 18, 24),
@@ -355,14 +356,15 @@ local function clampUtf8(value, maxCodepoints)
 	return value
 end
 
-local SUFFIXES = { "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp" }
+local SUFFIXES = { "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
 local function formatNumber(value)
 	value = tonumber(value) or 0
 	local absolute = math.abs(value)
 	if absolute < 1000 then
 		return tostring(math.floor(value + 0.5))
 	end
-	local tier = math.min(math.floor(math.log10(absolute) / 3), #SUFFIXES)
+	local rawTier = math.floor(math.log10(absolute) / 3)
+	local tier = math.min(rawTier, #SUFFIXES)
 	local scaled = value / (1000 ^ tier)
 	local formatted = string.format(scaled >= 100 and "%.0f%s" or scaled >= 10 and "%.1f%s" or "%.2f%s", scaled, SUFFIXES[tier])
 	local numberPart, suffix = formatted:match("^([%-]?[%d%.]+)(%a+)$")
@@ -382,7 +384,7 @@ local function formatMultiplier(value)
 end
 
 local function groupFor(category)
-	if category == "HarvestedFruits" then
+	if category == FRUIT_CATEGORY then
 		return "Fruits"
 	elseif category == "Seeds" then
 		return "Seeds"
@@ -395,32 +397,68 @@ local function stockMultiplier(fruitName)
 	return type(entry) == "table" and tonumber(entry.multiplier) or 1
 end
 
+local function firstField(value, fields)
+	if type(value) ~= "table" then
+		return nil
+	end
+	for _, field in ipairs(fields) do
+		local result = value[field]
+		if result ~= nil then
+			return result
+		end
+	end
+	return nil
+end
+
+local FRUIT_NAME_FIELDS = { "FruitName", "fruitName", "Fruit", "fruit", "Name", "name", "DisplayName", "displayName" }
+local FRUIT_ID_FIELDS = { "Id", "ID", "id", "Uuid", "UUID", "uuid", "Uid", "UID", "uid", "ItemId", "ItemID", "itemId", "InventoryId", "InventoryID", "inventoryId", "UniqueId", "UniqueID", "uniqueId" }
+local FRUIT_MUTATION_FIELDS = { "Mutation", "mutation", "MutationName", "mutationName" }
+local FRUIT_WEIGHT_FIELDS = { "Weight", "weight", "WeightGrams", "weightGrams", "Grams", "grams" }
+local FRUIT_SIZE_FIELDS = { "SizeMultiplier", "sizeMultiplier", "Size", "size" }
+local FRUIT_DECAY_FIELDS = { "DecayAlpha", "decayAlpha", "Decay", "decay" }
+local FRUIT_COUNT_FIELDS = { "Count", "count", "Amount", "amount", "Quantity", "quantity", "Stack", "stack" }
+
+local function normalizeFruitEntry(entryValue, fallbackName)
+	if type(entryValue) ~= "table" then
+		return entryValue
+	end
+	local normalized = table.clone(entryValue)
+	normalized.FruitName = firstField(entryValue, FRUIT_NAME_FIELDS) or fallbackName
+	normalized.Mutation = firstField(entryValue, FRUIT_MUTATION_FIELDS)
+	normalized.Weight = tonumber(firstField(entryValue, FRUIT_WEIGHT_FIELDS)) or 0
+	normalized.SizeMultiplier = tonumber(firstField(entryValue, FRUIT_SIZE_FIELDS)) or 1
+	normalized.DecayAlpha = tonumber(firstField(entryValue, FRUIT_DECAY_FIELDS))
+	return normalized
+end
+
 local function fruitBaseValue(entryValue, itemKey)
 	if type(entryValue) ~= "table" then
 		return 0
 	end
+	local normalized = normalizeFruitEntry(entryValue, itemKey)
 	local ok, result = pcall(
 		FruitValueCalc,
-		entryValue.FruitName or entryValue.Name or itemKey,
-		entryValue.SizeMultiplier or 1,
-		entryValue.Mutation,
+		normalized.FruitName or itemKey,
+		normalized.SizeMultiplier or 1,
+		normalized.Mutation,
 		LocalPlayer,
-		entryValue.DecayAlpha
+		normalized.DecayAlpha
 	)
 	return ok and type(result) == "number" and result or 0
 end
 
 local function fruitLiveValue(entryValue, itemKey)
-	local fruitName = type(entryValue) == "table" and (entryValue.FruitName or entryValue.Name or itemKey) or itemKey
-	return math.floor(fruitBaseValue(entryValue, itemKey) * stockMultiplier(fruitName))
+	local normalized = type(entryValue) == "table" and normalizeFruitEntry(entryValue, itemKey) or {}
+	local fruitName = normalized.FruitName or itemKey
+	return math.floor(fruitBaseValue(normalized, itemKey) * stockMultiplier(fruitName))
 end
 
 local function fruitDetails(entryValue, itemKey)
-	entryValue = type(entryValue) == "table" and entryValue or {}
-	local fruitName = entryValue.FruitName or entryValue.Name or itemKey
-	local mutation = entryValue.Mutation or "None"
-	local size = tonumber(entryValue.SizeMultiplier) or 1
-	local weight = tonumber(entryValue.Weight) or 0
+	local normalized = type(entryValue) == "table" and normalizeFruitEntry(entryValue, itemKey) or {}
+	local fruitName = normalized.FruitName or itemKey
+	local mutation = normalized.Mutation or "None"
+	local size = tonumber(normalized.SizeMultiplier) or 1
+	local weight = tonumber(normalized.Weight) or 0
 	local mutationMultiplier = 1
 	if mutation ~= "None" and mutation ~= "" then
 		local ok, result = pcall(MutationData.ReturnPriceMultiplier, mutation)
@@ -470,70 +508,123 @@ local function getInventory()
 	return Replica and Replica.Data and Replica.Data.Inventory or {}
 end
 
-local function isFruitEntry(value)
+local function fruitSignalScore(value)
 	if type(value) ~= "table" then
-		return false
+		return 0
 	end
-	return value.FruitName ~= nil
-		or value.Name ~= nil
-		or value.Mutation ~= nil
-		or value.Weight ~= nil
-		or value.SizeMultiplier ~= nil
-		or value.DecayAlpha ~= nil
-		or value.Id ~= nil
-		or value.ID ~= nil
+	local score = 0
+	if firstField(value, FRUIT_ID_FIELDS) ~= nil then score += 2 end
+	if firstField(value, FRUIT_MUTATION_FIELDS) ~= nil then score += 2 end
+	if firstField(value, FRUIT_WEIGHT_FIELDS) ~= nil then score += 2 end
+	if firstField(value, FRUIT_SIZE_FIELDS) ~= nil then score += 2 end
+	if firstField(value, FRUIT_DECAY_FIELDS) ~= nil then score += 1 end
+	if value.FruitName ~= nil or value.fruitName ~= nil then score += 4 end
+	return score
+end
+
+local function isFruitEntry(value, insideFruitContainer)
+	local score = fruitSignalScore(value)
+	return score >= 3 or (insideFruitContainer and score >= 1)
 end
 
 local function fruitIdentity(containerKey, entryValue)
-	if type(containerKey) ~= "number" then
-		return containerKey
-	end
-	if type(entryValue) == "table" then
-		return entryValue.Id
-			or entryValue.ID
-			or entryValue.Uuid
-			or entryValue.UUID
-			or entryValue.ItemId
-			or containerKey
+	local explicit = firstField(entryValue, FRUIT_ID_FIELDS)
+	if explicit ~= nil and tostring(explicit) ~= "" then
+		return explicit
 	end
 	return containerKey
 end
 
-local function collectFruitEntries(container, output, seen, depth)
-	if type(container) ~= "table" or depth > 3 then
+local function fruitAvailable(entryValue)
+	local count = tonumber(firstField(entryValue, FRUIT_COUNT_FIELDS))
+	if count and count > 0 then
+		return math.max(1, math.floor(count))
+	end
+	return 1
+end
+
+local function addFruitCandidate(output, seen, containerKey, entryValue, sourceName, iconOverride)
+	if type(entryValue) ~= "table" then
+		return
+	end
+	local itemKey = fruitIdentity(containerKey, entryValue)
+	if itemKey == nil then
+		return
+	end
+	local normalized = normalizeFruitEntry(entryValue, type(containerKey) == "string" and containerKey or nil)
+	local stableId = firstField(normalized, FRUIT_ID_FIELDS)
+	local identity = tostring(stableId or itemKey)
+	if identity == "" or seen[identity] then
+		return
+	end
+	seen[identity] = true
+	output[#output + 1] = {
+		ItemKey = itemKey,
+		EntryValue = normalized,
+		Available = fruitAvailable(normalized),
+		Source = sourceName,
+		Icon = normalizeImage(iconOverride),
+	}
+end
+
+local function collectFruitEntries(container, output, seen, depth, insideFruitContainer, path)
+	if type(container) ~= "table" or depth > 7 then
 		return
 	end
 	for containerKey, entryValue in pairs(container) do
-		if isFruitEntry(entryValue) then
-			local itemKey = fruitIdentity(containerKey, entryValue)
-			local identity = tostring(itemKey)
-			local entryIdentity = tostring(entryValue)
-			if not seen[identity] and not seen[entryIdentity] then
-				seen[identity] = true
-				seen[entryIdentity] = true
-				output[#output + 1] = {
-					ItemKey = itemKey,
-					EntryValue = entryValue,
-				}
-			end
+		local keyName = type(containerKey) == "string" and string.lower(containerKey) or ""
+		local childFruitContext = insideFruitContainer
+			or string.find(keyName, "fruit", 1, true) ~= nil
+			or string.find(keyName, "harvest", 1, true) ~= nil
+			or string.find(keyName, "produce", 1, true) ~= nil
+		local childPath = path .. "/" .. tostring(containerKey)
+		if isFruitEntry(entryValue, childFruitContext) then
+			addFruitCandidate(output, seen, containerKey, entryValue, childPath)
 		elseif type(entryValue) == "table" then
-			-- Supports array/map wrappers such as Items, Entries, Data, or
-			-- Fruits without recursively walking the entire player replica.
-			collectFruitEntries(entryValue, output, seen, depth + 1)
+			collectFruitEntries(entryValue, output, seen, depth + 1, childFruitContext, childPath)
 		end
 	end
 end
 
-local function collectNamedFruitContainers(parent, output, seen)
-	if type(parent) ~= "table" then
-		return
-	end
-	for key, value in pairs(parent) do
-		local name = type(key) == "string" and string.lower(key) or ""
-		if type(value) == "table" and (string.find(name, "fruit", 1, true) or string.find(name, "harvest", 1, true)) then
-			collectFruitEntries(value, output, seen, 1)
+local function toolAttributeTable(tool)
+	local data = {}
+	for _, name in ipairs({
+		"FruitName", "fruitName", "Name", "DisplayName",
+		"Id", "ID", "id", "Uuid", "UUID", "uuid", "Uid", "UID", "uid",
+		"ItemId", "ItemID", "itemId", "InventoryId", "InventoryID", "inventoryId",
+		"UniqueId", "UniqueID", "uniqueId", "Mutation", "mutation", "MutationName",
+		"Weight", "weight", "WeightGrams", "weightGrams", "Grams", "grams",
+		"SizeMultiplier", "sizeMultiplier", "DecayAlpha", "decayAlpha",
+		"Count", "count", "Amount", "amount", "Quantity", "quantity",
+		"Icon", "Image", "IconId", "ImageId",
+	}) do
+		local ok, value = pcall(tool.GetAttribute, tool, name)
+		if ok and value ~= nil then
+			data[name] = value
 		end
 	end
+	data.FruitName = data.FruitName or data.fruitName or tool.Name:match("^([^%[]+)") or tool.Name
+	data.DisplayName = data.DisplayName or tool.Name
+	return data
+end
+
+local function collectToolFruits(output, seen)
+	local function inspect(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") then
+				local data = toolAttributeTable(child)
+				if fruitSignalScore(data) >= 3 then
+					local id = firstField(data, FRUIT_ID_FIELDS)
+					if id ~= nil then
+						addFruitCandidate(output, seen, id, data, "Tool:" .. child.Name, child.TextureId)
+					end
+				end
+			end
+		end
+	end
+	inspect(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	inspect(LocalPlayer.Character)
 end
 
 local function harvestedFruitEntries()
@@ -544,15 +635,15 @@ local function harvestedFruitEntries()
 		return output
 	end
 
-	collectNamedFruitContainers(data, output, seen)
-	collectNamedFruitContainers(data.Inventory, output, seen)
-
-	-- Some builds place player collections one level below Replica.Data.
-	for _, child in pairs(data) do
-		if type(child) == "table" then
-			collectNamedFruitContainers(child, output, seen)
-		end
-	end
+	-- Search the whole player replica, not just catalog-named containers. The
+	-- live game can store grown fruit under generic collection/wrapper keys and
+	-- the native mailbox catalog intentionally omits this item class.
+	collectFruitEntries(data.Inventory, output, seen, 0, false, "Inventory")
+	collectFruitEntries(data, output, seen, 0, false, "Data")
+	-- Some executor/game builds expose harvested fruit as Backpack/Character
+	-- tools. Use their stable inventory UUID only; display names are never used
+	-- as the transport key when no ID is present.
+	collectToolFruits(output, seen)
 	return output
 end
 
@@ -561,7 +652,7 @@ local function mailableCategories()
 	local catalogCategories = MailboxItemCatalog.Categories
 	if type(catalogCategories) == "table" then
 		for _, category in ipairs(catalogCategories) do
-			if type(category) == "string" and category ~= "HarvestedFruits" then
+			if type(category) == "string" and category ~= FRUIT_CATEGORY then
 				categories[#categories + 1] = category
 			end
 		end
@@ -601,14 +692,15 @@ local function inventoryEntries()
 	for _, fruit in ipairs(harvestedFruitEntries()) do
 		local itemKey = fruit.ItemKey
 		local entryValue = fruit.EntryValue
-		local displayName, icon = resolveItem("HarvestedFruits", itemKey, entryValue)
+		local displayName, icon = resolveItem(FRUIT_CATEGORY, itemKey, entryValue)
+		if icon == "" then icon = fruit.Icon or "" end
 		output[#output + 1] = {
-			Key = "HarvestedFruits\31" .. tostring(itemKey),
-			Category = "HarvestedFruits",
+			Key = FRUIT_CATEGORY .. "\31" .. tostring(itemKey),
+			Category = FRUIT_CATEGORY,
 			Group = "Fruits",
 			ItemKey = itemKey,
 			EntryValue = entryValue,
-			Available = 1,
+			Available = fruit.Available or 1,
 			DisplayName = displayName,
 			Icon = icon,
 			LiveValue = fruitLiveValue(entryValue, itemKey),
@@ -638,7 +730,7 @@ end
 local function queueFruitValue()
 	local value = 0
 	for _, entry in pairs(State.Queue) do
-		if entry.Category == "HarvestedFruits" then
+		if entry.Category == FRUIT_CATEGORY then
 			value += fruitLiveValue(entry.EntryValue, entry.ItemKey) * entry.Selected
 		end
 	end
@@ -657,13 +749,8 @@ else
 	end)
 end
 
--- Cleanup through ENV is preferred because it also stops loops and disconnects
--- signals. This fallback removes orphaned UI left by a cleared global state or
--- a previous copy that failed before publishing its Cleanup function.
 local function destroyStaleGuiCopies(root)
-	if typeof(root) ~= "Instance" then
-		return
-	end
+	if typeof(root) ~= "Instance" then return end
 	pcall(function()
 		for _, child in ipairs(root:GetChildren()) do
 			if child:IsA("ScreenGui") and child.Name == "SmileB_GAG2MailManager" then
@@ -683,15 +770,9 @@ local ScreenGui = new("ScreenGui", {
 	IgnoreGuiInset = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, nil)
-if syn and type(syn.protect_gui) == "function" then
-	pcall(syn.protect_gui, ScreenGui)
-end
-local parented = pcall(function()
-	ScreenGui.Parent = GuiParent
-end)
-if not parented then
-	ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-end
+if syn and type(syn.protect_gui) == "function" then pcall(syn.protect_gui, ScreenGui) end
+local parented = pcall(function() ScreenGui.Parent = GuiParent end)
+if not parented then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 State.Gui = ScreenGui
 
 local Window = new("Frame", {
@@ -711,38 +792,26 @@ local transitionInProgress = false
 local function updateScale()
 	local camera = workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	-- Always fit inside the usable viewport. The previous 0.58 floor could
-	-- overflow short phone screens even though the window was "responsive".
 	local widthScale = math.max(0.1, (viewport.X - 16) / 1040)
 	local heightScale = math.max(0.1, (viewport.Y - 16) / 660)
 	responsiveScale = math.min(1, widthScale, heightScale)
-	if not transitionInProgress then
-		Scale.Scale = responsiveScale
-	end
+	if not transitionInProgress then Scale.Scale = responsiveScale end
 end
 
 local viewportConnection
 local function bindViewportCamera()
 	if viewportConnection then
-		pcall(function()
-			viewportConnection:Disconnect()
-		end)
+		pcall(function() viewportConnection:Disconnect() end)
 		viewportConnection = nil
 	end
 	local camera = workspace.CurrentCamera
-	if camera then
-		viewportConnection = track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale))
-	end
+	if camera then viewportConnection = track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)) end
 	updateScale()
 end
-
 bindViewportCamera()
 track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewportCamera))
 
-local Header = new("Frame", {
-	BackgroundColor3 = COLORS.Panel,
-	Size = UDim2.new(1, 0, 0, 48),
-}, Window)
+local Header = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, 0, 0, 48) }, Window)
 label(Header, "GAG2 Mail Manager", UDim2.fromOffset(16, 0), UDim2.new(0, 300, 1, 0), 17, COLORS.Text)
 local StockTimer = label(Header, "Fruit stock: loading...", UDim2.new(1, -420, 0, 0), UDim2.fromOffset(320, 48), 13, COLORS.Yellow, Enum.TextXAlignment.Right)
 local MinimizeButton = button(Header, "-", UDim2.new(1, -82, 0, 8), UDim2.fromOffset(32, 32), COLORS.Panel2)
@@ -757,1016 +826,394 @@ MinimizedBubble.TextSize = 22
 MinimizedBubble.Font = Enum.Font.GothamBold
 corner(MinimizedBubble, 29)
 stroke(MinimizedBubble, COLORS.Green, 2)
-new("UIGradient", {
-	Color = ColorSequence.new(COLORS.Green2, COLORS.Blue),
-	Rotation = 45,
-}, MinimizedBubble)
+new("UIGradient", { Color = ColorSequence.new(COLORS.Green2, COLORS.Blue), Rotation = 45 }, MinimizedBubble)
 
-local Nav = new("Frame", {
-	BackgroundTransparency = 1,
-	Position = UDim2.fromOffset(12, 54),
-	Size = UDim2.new(1, -24, 0, 34),
-}, Window)
+local Nav = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 54), Size = UDim2.new(1, -24, 0, 34) }, Window)
 local ComposeTab = button(Nav, "Compose", UDim2.fromOffset(0, 0), UDim2.fromOffset(110, 32), COLORS.Green2)
 local HistoryTab = button(Nav, "History", UDim2.fromOffset(118, 0), UDim2.fromOffset(110, 32), COLORS.Panel2)
-
-local Compose = new("Frame", {
-	BackgroundTransparency = 1,
-	Position = UDim2.fromOffset(12, 94),
-	Size = UDim2.new(1, -24, 1, -122),
-}, Window)
-local HistoryPage = new("Frame", {
-	BackgroundTransparency = 1,
-	Position = Compose.Position,
-	Size = Compose.Size,
-	Visible = false,
-}, Window)
+local Compose = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 94), Size = UDim2.new(1, -24, 1, -122) }, Window)
+local HistoryPage = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
 local Status = label(Window, "Ready", UDim2.new(0, 14, 1, -27), UDim2.new(1, -28, 0, 22), 12, COLORS.Muted)
+local function setStatus(text, color) Status.Text = tostring(text or ""); Status.TextColor3 = color or COLORS.Muted end
 
-local function setStatus(text, color)
-	Status.Text = tostring(text or "")
-	Status.TextColor3 = color or COLORS.Muted
-end
-
-local RecipientPanel = new("Frame", {
-	BackgroundColor3 = COLORS.Panel,
-	Size = UDim2.new(0, 244, 1, 0),
-}, Compose)
-corner(RecipientPanel, 10)
-stroke(RecipientPanel)
+local RecipientPanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(0, 244, 1, 0) }, Compose)
+corner(RecipientPanel, 10); stroke(RecipientPanel)
 label(RecipientPanel, "Recipient", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0, 24), 15, COLORS.Text)
 local UsernameBox = box(RecipientPanel, "Username", UDim2.fromOffset(12, 38), UDim2.new(1, -24, 0, 36))
 local ResolveButton = button(RecipientPanel, "Resolve username", UDim2.fromOffset(12, 82), UDim2.new(1, -24, 0, 34), COLORS.Blue)
-local Avatar = new("ImageLabel", {
-	BackgroundColor3 = COLORS.Panel2,
-	Position = UDim2.new(0.5, -42, 0, 132),
-	Size = UDim2.fromOffset(84, 84),
-	Image = "",
-	Visible = false,
-}, RecipientPanel)
-corner(Avatar, 42)
-stroke(Avatar)
+local Avatar = new("ImageLabel", { BackgroundColor3 = COLORS.Panel2, Position = UDim2.new(0.5, -42, 0, 132), Size = UDim2.fromOffset(84, 84), Image = "", Visible = false }, RecipientPanel)
+corner(Avatar, 42); stroke(Avatar)
 local ResolvedName = label(RecipientPanel, "No recipient selected", UDim2.fromOffset(12, 226), UDim2.new(1, -24, 0, 44), 13, COLORS.Muted, Enum.TextXAlignment.Center)
 ResolvedName.TextWrapped = true
-
 local function resetRecipientUI(message, color)
-	State.Resolved = nil
-	Avatar.Image = ""
-	Avatar.Visible = false
-	ResolveButton.Text = "Resolve username"
-	ResolvedName.Text = message or "No recipient selected"
-	ResolvedName.TextColor3 = color or COLORS.Muted
+	State.Resolved = nil; Avatar.Image = ""; Avatar.Visible = false; ResolveButton.Text = "Resolve username"
+	ResolvedName.Text = message or "No recipient selected"; ResolvedName.TextColor3 = color or COLORS.Muted
 end
+local LimitInfo = label(RecipientPanel, "Real game limits\n\n- 20 units per mail\n- 100-character note\n- Mailbox capacity: " .. tostring(MailboxFlags.Capacity:Get()) .. "\n\nLarge queues are sent as separate 20-unit batches and stop safely if the server rejects one.", UDim2.fromOffset(14, 294), UDim2.new(1, -28, 0, 190), 12, COLORS.Muted)
+LimitInfo.TextWrapped = true; LimitInfo.TextYAlignment = Enum.TextYAlignment.Top
 
-local LimitInfo = label(RecipientPanel,
-	"Real game limits\n\n- 20 units per mail\n- 100-character note\n- Mailbox capacity: " .. tostring(MailboxFlags.Capacity:Get()) .. "\n\nLarge queues are sent as separate 20-unit batches and stop safely if the server rejects one.",
-	UDim2.fromOffset(14, 294), UDim2.new(1, -28, 0, 190), 12, COLORS.Muted)
-LimitInfo.TextWrapped = true
-LimitInfo.TextYAlignment = Enum.TextYAlignment.Top
-
-local InventoryPanel = new("Frame", {
-	BackgroundColor3 = COLORS.Panel,
-	Position = UDim2.fromOffset(254, 0),
-	Size = UDim2.new(0, 374, 1, 0),
-}, Compose)
-corner(InventoryPanel, 10)
-stroke(InventoryPanel)
+local InventoryPanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(254, 0), Size = UDim2.new(0, 374, 1, 0) }, Compose)
+corner(InventoryPanel, 10); stroke(InventoryPanel)
 label(InventoryPanel, "Mailable inventory", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0, 24), 15, COLORS.Text)
 local InventorySearch = box(InventoryPanel, "Search items", UDim2.fromOffset(12, 36), UDim2.new(1, -100, 0, 34))
-local QuantityBox = box(InventoryPanel, "Qty", UDim2.new(1, -80, 0, 36), UDim2.fromOffset(68, 34))
-QuantityBox.Text = "1"
-QuantityBox.TextXAlignment = Enum.TextXAlignment.Center
-
-local FilterBar = new("Frame", {
-	BackgroundTransparency = 1,
-	Position = UDim2.fromOffset(12, 78),
-	Size = UDim2.new(1, -24, 0, 31),
-}, InventoryPanel)
+local QuantityBox = box(InventoryPanel, "Qty", UDim2.new(1, -80, 0, 36), UDim2.fromOffset(68, 34)); QuantityBox.Text = "1"; QuantityBox.TextXAlignment = Enum.TextXAlignment.Center
+local FilterBar = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 78), Size = UDim2.new(1, -24, 0, 31) }, InventoryPanel)
 local FilterButtons = {}
 for index, name in ipairs({ "All", "Fruits", "Seeds", "Gears" }) do
-	local filterButton = button(FilterBar, name, UDim2.fromOffset((index - 1) * 86, 0), UDim2.fromOffset(80, 29), name == "All" and COLORS.Green2 or COLORS.Panel2)
-	FilterButtons[name] = filterButton
+	FilterButtons[name] = button(FilterBar, name, UDim2.fromOffset((index - 1) * 86, 0), UDim2.fromOffset(80, 29), name == "All" and COLORS.Green2 or COLORS.Panel2)
 end
 local InventoryList = scrolling(InventoryPanel, UDim2.fromOffset(10, 116), UDim2.new(1, -20, 1, -126))
 
-local QueuePanel = new("Frame", {
-	BackgroundColor3 = COLORS.Panel,
-	Position = UDim2.fromOffset(638, 0),
-	Size = UDim2.new(1, -638, 1, 0),
-}, Compose)
-corner(QueuePanel, 10)
-stroke(QueuePanel)
+local QueuePanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(638, 0), Size = UDim2.new(1, -638, 1, 0) }, Compose)
+corner(QueuePanel, 10); stroke(QueuePanel)
 local QueueHeader = label(QueuePanel, "Queue: 0 / 100,000", UDim2.fromOffset(12, 7), UDim2.new(1, -95, 0, 25), 15, COLORS.Text)
 local ClearButton = button(QueuePanel, "Clear", UDim2.new(1, -78, 0, 7), UDim2.fromOffset(66, 28), COLORS.Panel2)
 local QueueValue = label(QueuePanel, "Selected fruit value: 0 Sheckles", UDim2.fromOffset(12, 35), UDim2.new(1, -24, 0, 23), 13, COLORS.Green)
 local QueueList = scrolling(QueuePanel, UDim2.fromOffset(10, 64), UDim2.new(1, -20, 1, -210))
-local NoteBox = box(QueuePanel, "Optional note (100 characters)", UDim2.new(0, 12, 1, -136), UDim2.new(1, -24, 0, 58))
-NoteBox.MultiLine = true
-NoteBox.TextWrapped = true
-NoteBox.TextYAlignment = Enum.TextYAlignment.Top
+local NoteBox = box(QueuePanel, "Optional note (100 characters)", UDim2.new(0, 12, 1, -136), UDim2.new(1, -24, 0, 58)); NoteBox.MultiLine = true; NoteBox.TextWrapped = true; NoteBox.TextYAlignment = Enum.TextYAlignment.Top
 local NoteCounter = label(QueuePanel, "0/100", UDim2.new(1, -90, 1, -77), UDim2.fromOffset(76, 18), 11, COLORS.Muted, Enum.TextXAlignment.Right)
 local SendButton = button(QueuePanel, "Send queued items", UDim2.new(0, 12, 1, -52), UDim2.new(1, -24, 0, 40), COLORS.Green2)
-
 local HistorySearch = box(HistoryPage, "Search recipient, note, or item", UDim2.fromOffset(0, 0), UDim2.new(1, -126, 0, 38))
 local ClearHistoryButton = button(HistoryPage, "Clear history", UDim2.new(1, -116, 0, 0), UDim2.fromOffset(116, 38), COLORS.Panel2)
 local HistoryList = scrolling(HistoryPage, UDim2.fromOffset(0, 48), UDim2.new(1, 0, 1, -48))
 
-local rebuildInventoryUI
-local rebuildQueueUI
-local rebuildHistoryUI
-
+local rebuildInventoryUI; local rebuildQueueUI; local rebuildHistoryUI
 local function requestedQuantity()
-	local number = tonumber(QuantityBox.Text)
-	if not number or number ~= number then
-		return 1
-	end
+	local number = tonumber(QuantityBox.Text); if not number or number ~= number then return 1 end
 	return math.clamp(math.floor(number), 1, MAX_QUEUE_UNITS)
 end
-
 local function queueAdd(item)
-	if State.Sending then
-		setStatus("Stop the current send before editing the queue", COLORS.Yellow)
-		return
-	end
-	local current = State.Queue[item.Key]
-	local already = current and current.Selected or 0
-	local requested = item.Category == "HarvestedFruits" and 1 or requestedQuantity()
-	local allowedByInventory = math.max(0, item.Available - already)
-	local allowedByQueue = math.max(0, MAX_QUEUE_UNITS - queueUnits())
-	local amount = math.min(requested, allowedByInventory, allowedByQueue)
-	if amount <= 0 then
-		setStatus("That item is already fully queued, or the 100,000-unit queue is full", COLORS.Yellow)
-		return
-	end
+	if State.Sending then setStatus("Stop the current send before editing the queue", COLORS.Yellow); return end
+	local current = State.Queue[item.Key]; local already = current and current.Selected or 0
+	local requested = item.Category == FRUIT_CATEGORY and math.min(requestedQuantity(), item.Available) or requestedQuantity()
+	local amount = math.min(requested, math.max(0, item.Available - already), math.max(0, MAX_QUEUE_UNITS - queueUnits()))
+	if amount <= 0 then setStatus("That item is already fully queued, or the 100,000-unit queue is full", COLORS.Yellow); return end
 	if not current then
-		current = {
-			Key = item.Key,
-			Category = item.Category,
-			ItemKey = item.ItemKey,
-			EntryValue = item.EntryValue,
-			DisplayName = item.DisplayName,
-			Icon = item.Icon,
-			Selected = 0,
-		}
+		current = { Key = item.Key, Category = item.Category, ItemKey = item.ItemKey, EntryValue = item.EntryValue, DisplayName = item.DisplayName, Icon = item.Icon, Selected = 0 }
 		State.Queue[item.Key] = current
 	end
 	current.Selected += amount
 	setStatus(string.format("Queued %s x%s", item.DisplayName, formatNumber(amount)), COLORS.Green)
-	rebuildInventoryUI()
-	rebuildQueueUI()
+	rebuildInventoryUI(); rebuildQueueUI()
 end
-
 local function queueRemove(key, amount)
-	if State.Sending then
-		return
-	end
-	local entry = State.Queue[key]
-	if not entry then
-		return
-	end
-	entry.Selected -= amount or 1
-	if entry.Selected <= 0 then
-		State.Queue[key] = nil
-	end
-	rebuildInventoryUI()
-	rebuildQueueUI()
+	if State.Sending then return end
+	local entry = State.Queue[key]; if not entry then return end
+	entry.Selected -= amount or 1; if entry.Selected <= 0 then State.Queue[key] = nil end
+	rebuildInventoryUI(); rebuildQueueUI()
 end
 
 rebuildInventoryUI = function()
-	if State.Dead then
-		return
-	end
+	if State.Dead then return end
 	clearList(InventoryList)
-	local query = string.lower(trim(InventorySearch.Text))
-	local entries = inventoryEntries()
-	local shown = 0
+	local query = string.lower(trim(InventorySearch.Text)); local entries = inventoryEntries(); local shown = 0
 	for _, item in ipairs(entries) do
 		local queued = State.Queue[item.Key] and State.Queue[item.Key].Selected or 0
 		local remaining = math.max(0, item.Available - queued)
 		local searchable = string.lower(item.DisplayName .. " " .. item.Category .. " " .. item.Group)
 		if remaining > 0 and (State.Filter == "All" or State.Filter == item.Group) and (query == "" or string.find(searchable, query, 1, true)) then
 			shown += 1
-			local row = new("Frame", {
-				BackgroundColor3 = COLORS.Panel2,
-				Size = UDim2.new(1, -4, 0, 76),
-				LayoutOrder = shown,
-			}, InventoryList)
-			corner(row, 8)
-			local icon = new("ImageLabel", {
-				BackgroundColor3 = COLORS.Back,
-				Position = UDim2.fromOffset(7, 7),
-				Size = UDim2.fromOffset(62, 62),
-				Image = item.Icon,
-			}, row)
-			corner(icon, 7)
-			local nameLabel = label(row, item.DisplayName, UDim2.fromOffset(78, 6), UDim2.new(1, -155, 0, 22), 13, COLORS.Text)
-			nameLabel.Font = Enum.Font.GothamSemibold
+			local row = new("Frame", { BackgroundColor3 = COLORS.Panel2, Size = UDim2.new(1, -4, 0, 82), LayoutOrder = shown }, InventoryList); corner(row, 8)
+			local icon = new("ImageLabel", { BackgroundColor3 = COLORS.Back, Position = UDim2.fromOffset(7, 10), Size = UDim2.fromOffset(62, 62), Image = item.Icon }, row); corner(icon, 7)
+			local nameLabel = label(row, item.DisplayName, UDim2.fromOffset(78, 5), UDim2.new(1, -155, 0, 22), 13, COLORS.Text); nameLabel.Font = Enum.Font.GothamSemibold
 			local detail
-			if item.Category == "HarvestedFruits" then
-				detail = fruitDetails(item.EntryValue, item.ItemKey) .. "\n" .. formatNumber(item.LiveValue) .. " Sheckles"
+			if item.Category == FRUIT_CATEGORY then
+				detail = fruitDetails(item.EntryValue, item.ItemKey) .. "\n" .. formatNumber(item.LiveValue) .. " each | " .. formatNumber(remaining) .. " available"
 			else
 				detail = item.Category .. " | available " .. formatNumber(remaining)
 			end
-			local detailLabel = label(row, detail, UDim2.fromOffset(78, 29), UDim2.new(1, -155, 0, 41), 10, item.Category == "HarvestedFruits" and COLORS.Green or COLORS.Muted)
-			detailLabel.TextWrapped = true
-			detailLabel.TextYAlignment = Enum.TextYAlignment.Top
-			local add = button(row, item.Category == "HarvestedFruits" and "Add" or "+ Qty", UDim2.new(1, -70, 0.5, -16), UDim2.fromOffset(62, 32), COLORS.Green2)
-			add.Activated:Connect(function()
-				queueAdd(item)
-			end)
+			local detailLabel = label(row, detail, UDim2.fromOffset(78, 27), UDim2.new(1, -155, 0, 49), 10, item.Category == FRUIT_CATEGORY and COLORS.Green or COLORS.Muted); detailLabel.TextWrapped = true; detailLabel.TextYAlignment = Enum.TextYAlignment.Top
+			local add = button(row, item.Category == FRUIT_CATEGORY and "+ Fruit" or "+ Qty", UDim2.new(1, -70, 0.5, -16), UDim2.fromOffset(62, 32), COLORS.Green2)
+			add.Activated:Connect(function() queueAdd(item) end)
 		end
 	end
-	if shown == 0 then
-		local empty = label(InventoryList, "No matching mailable items", UDim2.new(), UDim2.new(1, -4, 0, 50), 13, COLORS.Muted, Enum.TextXAlignment.Center)
-		empty.LayoutOrder = 1
-	end
+	if shown == 0 then local empty = label(InventoryList, State.Filter == "Fruits" and "No grown fruits detected in inventory" or "No matching mailable items", UDim2.new(), UDim2.new(1, -4, 0, 50), 13, COLORS.Muted, Enum.TextXAlignment.Center); empty.LayoutOrder = 1 end
 end
 
 rebuildQueueUI = function()
-	if State.Dead then
-		return
-	end
+	if State.Dead then return end
 	clearList(QueueList)
-	local entries = {}
-	for _, entry in pairs(State.Queue) do
-		entries[#entries + 1] = entry
-	end
-	table.sort(entries, function(a, b)
-		return string.lower(a.DisplayName) < string.lower(b.DisplayName)
-	end)
+	local entries = {}; for _, entry in pairs(State.Queue) do entries[#entries + 1] = entry end
+	table.sort(entries, function(a, b) return string.lower(a.DisplayName) < string.lower(b.DisplayName) end)
 	for index, entry in ipairs(entries) do
-		local row = new("Frame", {
-			BackgroundColor3 = COLORS.Panel2,
-			Size = UDim2.new(1, -4, 0, 65),
-			LayoutOrder = index,
-		}, QueueList)
-		corner(row, 8)
-		local icon = new("ImageLabel", {
-			BackgroundColor3 = COLORS.Back,
-			Position = UDim2.fromOffset(6, 6),
-			Size = UDim2.fromOffset(53, 53),
-			Image = entry.Icon,
-		}, row)
-		corner(icon, 7)
-		local nameLabel = label(row, entry.DisplayName, UDim2.fromOffset(68, 5), UDim2.new(1, -142, 0, 22), 12, COLORS.Text)
-		nameLabel.Font = Enum.Font.GothamSemibold
+		local row = new("Frame", { BackgroundColor3 = COLORS.Panel2, Size = UDim2.new(1, -4, 0, 68), LayoutOrder = index }, QueueList); corner(row, 8)
+		local icon = new("ImageLabel", { BackgroundColor3 = COLORS.Back, Position = UDim2.fromOffset(6, 7), Size = UDim2.fromOffset(53, 53), Image = entry.Icon }, row); corner(icon, 7)
+		local nameLabel = label(row, entry.DisplayName, UDim2.fromOffset(68, 5), UDim2.new(1, -142, 0, 22), 12, COLORS.Text); nameLabel.Font = Enum.Font.GothamSemibold
 		local detail = "x" .. formatNumber(entry.Selected)
-		if entry.Category == "HarvestedFruits" then
-			detail ..= " | " .. formatNumber(fruitLiveValue(entry.EntryValue, entry.ItemKey)) .. " Sheckles"
+		if entry.Category == FRUIT_CATEGORY then
+			local each = fruitLiveValue(entry.EntryValue, entry.ItemKey)
+			detail ..= " | each " .. formatNumber(each) .. " | selected " .. formatNumber(each * entry.Selected)
 		end
-		label(row, detail, UDim2.fromOffset(68, 29), UDim2.new(1, -142, 0, 25), 11, COLORS.Muted)
+		label(row, detail, UDim2.fromOffset(68, 29), UDim2.new(1, -142, 0, 31), 10, entry.Category == FRUIT_CATEGORY and COLORS.Green or COLORS.Muted)
 		local remove = button(row, "-", UDim2.new(1, -66, 0, 8), UDim2.fromOffset(27, 27), COLORS.Panel)
 		local removeAll = button(row, "X", UDim2.new(1, -34, 0, 8), UDim2.fromOffset(27, 27), COLORS.Red)
-		remove.Activated:Connect(function()
-			queueRemove(entry.Key, 1)
-		end)
-		removeAll.Activated:Connect(function()
-			queueRemove(entry.Key, entry.Selected)
-		end)
+		remove.Activated:Connect(function() queueRemove(entry.Key, 1) end); removeAll.Activated:Connect(function() queueRemove(entry.Key, entry.Selected) end)
 	end
-	local count = queueUnits()
-	QueueHeader.Text = string.format("Queue: %s / 100,000", formatNumber(count))
+	QueueHeader.Text = string.format("Queue: %s / 100,000", formatNumber(queueUnits()))
 	QueueValue.Text = string.format("Selected fruit value: %s Sheckles", formatNumber(queueFruitValue()))
-	if #entries == 0 then
-		local empty = label(QueueList, "Queue is empty", UDim2.new(), UDim2.new(1, -4, 0, 50), 13, COLORS.Muted, Enum.TextXAlignment.Center)
-		empty.LayoutOrder = 1
-	end
+	if #entries == 0 then local empty = label(QueueList, "Queue is empty", UDim2.new(), UDim2.new(1, -4, 0, 50), 13, COLORS.Muted, Enum.TextXAlignment.Center); empty.LayoutOrder = 1 end
 end
 
 local function historyMatches(entry, query)
-	if query == "" then
-		return true
-	end
-	local parts = {
-		tostring(entry.RecipientName or ""),
-		tostring(entry.Username or ""),
-		tostring(entry.Note or ""),
-		tostring(entry.Status or ""),
-	}
-	for _, item in ipairs(entry.Items or {}) do
-		parts[#parts + 1] = tostring(item.Name or "")
-		parts[#parts + 1] = tostring(item.Category or "")
-	end
+	if query == "" then return true end
+	local parts = { tostring(entry.RecipientName or ""), tostring(entry.Username or ""), tostring(entry.Note or ""), tostring(entry.Status or "") }
+	for _, item in ipairs(entry.Items or {}) do parts[#parts + 1] = tostring(item.Name or ""); parts[#parts + 1] = tostring(item.Category or "") end
 	return string.find(string.lower(table.concat(parts, " ")), query, 1, true) ~= nil
 end
 
 rebuildHistoryUI = function()
-	if State.Dead then
-		return
-	end
-	clearList(HistoryList)
-	local query = string.lower(trim(HistorySearch.Text))
-	local shown = 0
+	if State.Dead then return end
+	clearList(HistoryList); local query = string.lower(trim(HistorySearch.Text)); local shown = 0
 	for historyIndex, entry in ipairs(History) do
 		if historyMatches(entry, query) then
 			shown += 1
-			local row = new("Frame", {
-				BackgroundColor3 = COLORS.Panel,
-				Size = UDim2.new(1, -4, 0, 102),
-				LayoutOrder = shown,
-			}, HistoryList)
-			corner(row, 9)
-			stroke(row)
+			local row = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, -4, 0, 102), LayoutOrder = shown }, HistoryList); corner(row, 9); stroke(row)
 			local when = os.date("%Y-%m-%d %H:%M", tonumber(entry.Time) or os.time())
-			local title = string.format("To %s (@%s) | %s", entry.RecipientName or "Player", entry.Username or "?", when)
-			local titleLabel = label(row, title, UDim2.fromOffset(12, 7), UDim2.new(1, -90, 0, 22), 13, COLORS.Text)
-			titleLabel.Font = Enum.Font.GothamSemibold
-			local historyStatus = tostring(entry.Status or "Unknown")
-			local historyColor = historyStatus == "Completed" and COLORS.Green or COLORS.Yellow
+			local titleLabel = label(row, string.format("To %s (@%s) | %s", entry.RecipientName or "Player", entry.Username or "?", when), UDim2.fromOffset(12, 7), UDim2.new(1, -90, 0, 22), 13, COLORS.Text); titleLabel.Font = Enum.Font.GothamSemibold
+			local historyStatus = tostring(entry.Status or "Unknown"); local historyColor = historyStatus == "Completed" and COLORS.Green or COLORS.Yellow
 			label(row, string.format("%s units | %s batch(es) | %s Sheckles | %s", formatNumber(entry.Units or 0), tostring(entry.Batches or 0), formatNumber(entry.TotalValue or 0), historyStatus), UDim2.fromOffset(12, 29), UDim2.new(1, -24, 0, 20), 11, historyColor)
-			local summaries = {}
-			for _, item in ipairs(entry.Items or {}) do
-				summaries[#summaries + 1] = tostring(item.Name) .. " x" .. formatNumber(item.Count)
-			end
-			local summary = table.concat(summaries, ", ")
-			if entry.Note and entry.Note ~= "" then
-				summary ..= " | Note: " .. entry.Note
-			end
-			local summaryLabel = label(row, summary, UDim2.fromOffset(12, 51), UDim2.new(1, -210, 0, 42), 11, COLORS.Muted)
-			summaryLabel.TextWrapped = true
-			summaryLabel.TextYAlignment = Enum.TextYAlignment.Top
-			local icons = new("Frame", {
-				BackgroundTransparency = 1,
-				Position = UDim2.new(1, -190, 0, 49),
-				Size = UDim2.fromOffset(178, 44),
-			}, row)
-			for iconIndex = 1, math.min(4, #(entry.Items or {})) do
-				local item = entry.Items[iconIndex]
-				local image = new("ImageLabel", {
-					BackgroundColor3 = COLORS.Panel2,
-					Position = UDim2.fromOffset((iconIndex - 1) * 43, 1),
-					Size = UDim2.fromOffset(40, 40),
-					Image = item.Icon or "",
-				}, icons)
-				corner(image, 6)
-			end
+			local summaries = {}; for _, item in ipairs(entry.Items or {}) do summaries[#summaries + 1] = tostring(item.Name) .. " x" .. formatNumber(item.Count) end
+			local summary = table.concat(summaries, ", "); if entry.Note and entry.Note ~= "" then summary ..= " | Note: " .. entry.Note end
+			local summaryLabel = label(row, summary, UDim2.fromOffset(12, 51), UDim2.new(1, -210, 0, 42), 11, COLORS.Muted); summaryLabel.TextWrapped = true; summaryLabel.TextYAlignment = Enum.TextYAlignment.Top
+			local icons = new("Frame", { BackgroundTransparency = 1, Position = UDim2.new(1, -190, 0, 49), Size = UDim2.fromOffset(178, 44) }, row)
+			for iconIndex = 1, math.min(4, #(entry.Items or {})) do local item = entry.Items[iconIndex]; local image = new("ImageLabel", { BackgroundColor3 = COLORS.Panel2, Position = UDim2.fromOffset((iconIndex - 1) * 43, 1), Size = UDim2.fromOffset(40, 40), Image = item.Icon or "" }, icons); corner(image, 6) end
 			local delete = button(row, "Delete", UDim2.new(1, -72, 0, 7), UDim2.fromOffset(60, 25), COLORS.Panel2)
-			delete.Activated:Connect(function()
-				table.remove(History, historyIndex)
-				saveHistory()
-				rebuildHistoryUI()
-			end)
+			delete.Activated:Connect(function() table.remove(History, historyIndex); saveHistory(); rebuildHistoryUI() end)
 		end
 	end
-	if shown == 0 then
-		local empty = label(HistoryList, "No matching mail history", UDim2.new(), UDim2.new(1, -4, 0, 60), 13, COLORS.Muted, Enum.TextXAlignment.Center)
-		empty.LayoutOrder = 1
-	end
+	if shown == 0 then local empty = label(HistoryList, "No matching mail history", UDim2.new(), UDim2.new(1, -4, 0, 60), 13, COLORS.Muted, Enum.TextXAlignment.Center); empty.LayoutOrder = 1 end
 end
 
 local function applyStockSnapshot(snapshot)
-	if type(snapshot) ~= "table" then
-		return
-	end
+	if type(snapshot) ~= "table" then return end
 	State.Stock.LastError = nil
-	-- Timing-only snapshots must not erase the last known multipliers.
 	if type(snapshot.entries) == "table" then
 		local entries = {}
-		for fruitName, entry in pairs(snapshot.entries) do
-			if type(fruitName) == "string" and type(entry) == "table" then
-				entries[fruitName] = {
-					multiplier = type(entry.multiplier) == "number" and entry.multiplier or 1,
-					tier = type(entry.tier) == "string" and entry.tier or "normal",
-				}
-			end
-		end
+		for fruitName, entry in pairs(snapshot.entries) do if type(fruitName) == "string" and type(entry) == "table" then entries[fruitName] = { multiplier = type(entry.multiplier) == "number" and entry.multiplier or 1, tier = type(entry.tier) == "string" and entry.tier or "normal" } end end
 		State.Stock.Entries = entries
 	end
 	State.Stock.LastRefreshUnix = tonumber(snapshot.lastRefreshUnix) or State.Stock.LastRefreshUnix
 	State.Stock.NextRefreshUnix = tonumber(snapshot.nextRefreshUnix) or State.Stock.NextRefreshUnix
 	State.Stock.CycleSeconds = tonumber(snapshot.cycleSeconds) or State.Stock.CycleSeconds
-	if type(snapshot.server_now_unix) == "number" then
-		State.Stock.ClockOffset = snapshot.server_now_unix - os.time()
-	end
-	rebuildInventoryUI()
-	rebuildQueueUI()
+	if type(snapshot.server_now_unix) == "number" then State.Stock.ClockOffset = snapshot.server_now_unix - os.time() end
+	rebuildInventoryUI(); rebuildQueueUI()
 end
 
 local function requestStockSnapshot()
-	if State.Dead or State.Stock.RequestInFlight or os.clock() < State.Stock.NextRequestClock then
-		return
-	end
-	State.Stock.RequestInFlight = true
-	State.Stock.RequestToken += 1
-	State.Stock.LastError = nil
-	State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
+	if State.Dead or State.Stock.RequestInFlight or os.clock() < State.Stock.NextRequestClock then return end
+	State.Stock.RequestInFlight = true; State.Stock.RequestToken += 1; State.Stock.LastError = nil; State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
 	local token = State.Stock.RequestToken
-
 	task.spawn(function()
-		local ok, snapshot = pcall(function()
-			return Networking.FruitStock.Request:Fire()
-		end)
-		if State.Dead or token ~= State.Stock.RequestToken then
-			return
-		end
-		State.Stock.RequestInFlight = false
-		if ok then
-			applyStockSnapshot(snapshot)
-		else
-			State.Stock.LastError = "request failed"
-		end
+		local ok, snapshot = pcall(function() return Networking.FruitStock.Request:Fire() end)
+		if State.Dead or token ~= State.Stock.RequestToken then return end
+		State.Stock.RequestInFlight = false; if ok then applyStockSnapshot(snapshot) else State.Stock.LastError = "request failed" end
 	end)
-
-	-- The request is read-only, so a timed-out generation can be abandoned and
-	-- retried without risking duplicate mail. A late response is ignored.
 	task.spawn(function()
 		task.wait(State.Stock.TimeoutSeconds)
-		if State.Dead or token ~= State.Stock.RequestToken or not State.Stock.RequestInFlight then
-			return
-		end
-		State.Stock.RequestToken += 1
-		State.Stock.RequestInFlight = false
-		State.Stock.LastError = "request timed out"
-		State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
+		if State.Dead or token ~= State.Stock.RequestToken or not State.Stock.RequestInFlight then return end
+		State.Stock.RequestToken += 1; State.Stock.RequestInFlight = false; State.Stock.LastError = "request timed out"; State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
 	end)
 end
 
 local function updateStockTimer()
 	local nextRefresh = State.Stock.NextRefreshUnix
 	if nextRefresh <= 0 then
-		if State.Stock.RequestInFlight then
-			StockTimer.Text = "Fruit Price Stock: refreshing..."
-		elseif State.Stock.LastError then
-			StockTimer.Text = "Fruit stock: " .. State.Stock.LastError .. "; retrying..."
-		else
-			StockTimer.Text = "Fruit stock: unavailable"
-		end
+		if State.Stock.RequestInFlight then StockTimer.Text = "Fruit Price Stock: refreshing..." elseif State.Stock.LastError then StockTimer.Text = "Fruit stock: " .. State.Stock.LastError .. "; retrying..." else StockTimer.Text = "Fruit stock: unavailable" end
 		return
 	end
 	local remaining = math.max(0, math.floor(nextRefresh - (os.time() + State.Stock.ClockOffset)))
-	if remaining == 0 and State.Stock.RequestInFlight then
-		StockTimer.Text = "Fruit Price Stock: refreshing..."
-	else
-		StockTimer.Text = string.format("Fruit Price Stock refresh in %dm %02ds", remaining // 60, remaining % 60)
-	end
+	if remaining == 0 and State.Stock.RequestInFlight then StockTimer.Text = "Fruit Price Stock: refreshing..." else StockTimer.Text = string.format("Fruit Price Stock refresh in %dm %02ds", remaining // 60, remaining % 60) end
 end
 
 local RECIPIENT_LOOKUP_TIMEOUT = 12
 local resolveToken = 0
 local function resolveRecipient()
 	local username = trim(UsernameBox.Text):gsub("^@", "")
-	if #username < 3 or #username > 20 or not username:match("^[%w_]+$") then
-		resolveToken += 1
-		resetRecipientUI("Enter a valid Roblox username", COLORS.Red)
-		setStatus("Username must be 3-20 letters, numbers, or underscores", COLORS.Red)
-		return
-	end
-	resolveToken += 1
-	local token = resolveToken
-	local finished = false
-	resetRecipientUI("Looking up @" .. username, COLORS.Muted)
-	ResolveButton.Text = "Resolving..."
+	if #username < 3 or #username > 20 or not username:match("^[%w_]+$") then resolveToken += 1; resetRecipientUI("Enter a valid Roblox username", COLORS.Red); setStatus("Username must be 3-20 letters, numbers, or underscores", COLORS.Red); return end
+	resolveToken += 1; local token = resolveToken; local finished = false; resetRecipientUI("Looking up @" .. username, COLORS.Muted); ResolveButton.Text = "Resolving..."
 	task.spawn(function()
-		local ok, userId, displayName = pcall(function()
-			return Networking.Mailbox.LookupPlayer:Fire(username)
-		end)
-		if State.Dead or token ~= resolveToken then
-			return
-		end
-		finished = true
-		if not ok or type(userId) ~= "number" or userId <= 0 then
-			resetRecipientUI("Player not found", COLORS.Red)
-			setStatus("The game could not resolve that username", COLORS.Red)
-			return
-		end
-		if userId == LocalPlayer.UserId then
-			resetRecipientUI("You cannot mail yourself", COLORS.Red)
-			setStatus("Choose another player", COLORS.Red)
-			return
-		end
-		ResolveButton.Text = "Resolve username"
-		displayName = type(displayName) == "string" and displayName ~= "" and displayName or username
-		State.Resolved = {
-			UserId = userId,
-			Username = username,
-			DisplayName = displayName,
-		}
-		ResolvedName.Text = displayName .. "\n@" .. username
-		ResolvedName.TextColor3 = COLORS.Green
-		setStatus("Recipient resolved", COLORS.Green)
+		local ok, userId, displayName = pcall(function() return Networking.Mailbox.LookupPlayer:Fire(username) end)
+		if State.Dead or token ~= resolveToken then return end; finished = true
+		if not ok or type(userId) ~= "number" or userId <= 0 then resetRecipientUI("Player not found", COLORS.Red); setStatus("The game could not resolve that username", COLORS.Red); return end
+		if userId == LocalPlayer.UserId then resetRecipientUI("You cannot mail yourself", COLORS.Red); setStatus("Choose another player", COLORS.Red); return end
+		ResolveButton.Text = "Resolve username"; displayName = type(displayName) == "string" and displayName ~= "" and displayName or username
+		State.Resolved = { UserId = userId, Username = username, DisplayName = displayName }; ResolvedName.Text = displayName .. "\n@" .. username; ResolvedName.TextColor3 = COLORS.Green; setStatus("Recipient resolved", COLORS.Green)
 		local imageOk, image = pcall(Players.GetUserThumbnailAsync, Players, userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
-		if imageOk and type(image) == "string" and image ~= "" and token == resolveToken and not State.Dead then
-			Avatar.Image = image
-			Avatar.Visible = true
-		end
+		if imageOk and type(image) == "string" and image ~= "" and token == resolveToken and not State.Dead then Avatar.Image = image; Avatar.Visible = true end
 	end)
-	task.spawn(function()
-		task.wait(RECIPIENT_LOOKUP_TIMEOUT)
-		if State.Dead or finished or token ~= resolveToken then
-			return
-		end
-		resolveToken += 1
-		resetRecipientUI("Lookup timed out", COLORS.Red)
-		setStatus("Username lookup timed out; try again", COLORS.Red)
-	end)
+	task.spawn(function() task.wait(RECIPIENT_LOOKUP_TIMEOUT); if State.Dead or finished or token ~= resolveToken then return end; resolveToken += 1; resetRecipientUI("Lookup timed out", COLORS.Red); setStatus("Username lookup timed out; try again", COLORS.Red) end)
 end
 
 local function addHistory(recipient, note, sentItems, units, batches, totalValue, finalStatus)
-	if units <= 0 then
-		return
-	end
-	local items = {}
-	for _, item in pairs(sentItems) do
-		items[#items + 1] = item
-	end
-	table.sort(items, function(a, b)
-		return string.lower(a.Name) < string.lower(b.Name)
-	end)
-	table.insert(History, 1, {
-		Time = os.time(),
-		RecipientName = recipient.DisplayName,
-		Username = recipient.Username,
-		UserId = recipient.UserId,
-		Note = note,
-		Items = items,
-		Units = units,
-		Batches = batches,
-		TotalValue = totalValue,
-		Status = finalStatus,
-	})
-	while #History > HISTORY_LIMIT do
-		table.remove(History)
-	end
-	saveHistory()
-	rebuildHistoryUI()
+	if units <= 0 then return end
+	local items = {}; for _, item in pairs(sentItems) do items[#items + 1] = item end; table.sort(items, function(a, b) return string.lower(a.Name) < string.lower(b.Name) end)
+	table.insert(History, 1, { Time = os.time(), RecipientName = recipient.DisplayName, Username = recipient.Username, UserId = recipient.UserId, Note = note, Items = items, Units = units, Batches = batches, TotalValue = totalValue, Status = finalStatus })
+	while #History > HISTORY_LIMIT do table.remove(History) end; saveHistory(); rebuildHistoryUI()
 end
 
 local function buildJob()
 	local job = {}
-	for key, entry in pairs(State.Queue) do
-		if entry.Selected > 0 then
-			job[#job + 1] = {
-				Key = key,
-				Category = entry.Category,
-				ItemKey = entry.ItemKey,
-				EntryValue = entry.EntryValue,
-				DisplayName = entry.DisplayName,
-				Icon = entry.Icon,
-				Remaining = entry.Selected,
-			}
-		end
-	end
-	table.sort(job, function(a, b)
-		if a.Category == b.Category then
-			return tostring(a.ItemKey) < tostring(b.ItemKey)
-		end
-		return a.Category < b.Category
-	end)
+	for key, entry in pairs(State.Queue) do if entry.Selected > 0 then job[#job + 1] = { Key = key, Category = entry.Category, ItemKey = entry.ItemKey, EntryValue = entry.EntryValue, DisplayName = entry.DisplayName, Icon = entry.Icon, Remaining = entry.Selected } end end
+	table.sort(job, function(a, b) if a.Category == b.Category then return tostring(a.ItemKey) < tostring(b.ItemKey) end; return a.Category < b.Category end)
 	return job
 end
-
 local function nextBatch(job)
-	local capacity = SERVER_BATCH_UNITS
-	local payload = {}
-	local portions = {}
+	local capacity = SERVER_BATCH_UNITS; local payload = {}; local portions = {}
 	for _, entry in ipairs(job) do
-		if capacity <= 0 then
-			break
-		end
+		if capacity <= 0 then break end
 		if entry.Remaining > 0 then
 			local amount = math.min(entry.Remaining, capacity)
-			payload[#payload + 1] = {
-				Category = entry.Category,
-				ItemKey = entry.ItemKey,
-				Count = amount,
-			}
-			portions[#portions + 1] = { Entry = entry, Count = amount }
-			capacity -= amount
+			payload[#payload + 1] = { Category = entry.Category, ItemKey = entry.ItemKey, Count = amount }
+			portions[#portions + 1] = { Entry = entry, Count = amount }; capacity -= amount
 		end
 	end
 	return payload, portions
 end
 
 local function beginSend()
-	if State.Sending then
-		State.SendToken += 1
-		setStatus("Stopping after the current server response...", COLORS.Yellow)
-		return
-	end
-	if not State.Resolved then
-		setStatus("Resolve a recipient first", COLORS.Red)
-		return
-	end
-	if not MailboxFlags.OpenEnabled:Get() then
-		setStatus("The game's mailbox is currently unavailable", COLORS.Red)
-		return
-	end
-	if queueUnits() <= 0 then
-		setStatus("Queue at least one item", COLORS.Red)
-		return
-	end
-	local availableByKey = {}
-	for _, item in ipairs(inventoryEntries()) do
-		availableByKey[item.Key] = item.Available
-	end
-	for key, entry in pairs(State.Queue) do
-		if entry.Selected > (availableByKey[key] or 0) then
-			setStatus("Inventory changed: reduce or re-add " .. entry.DisplayName .. " before sending", COLORS.Red)
-			rebuildInventoryUI()
-			return
-		end
-	end
-	local recipient = {
-		UserId = State.Resolved.UserId,
-		Username = State.Resolved.Username,
-		DisplayName = State.Resolved.DisplayName,
-	}
-	local note = clampUtf8(NoteBox.Text, NOTE_CODEPOINT_LIMIT)
-	local job = buildJob()
-	local total = queueUnits()
-	local expectedBatches = math.ceil(total / SERVER_BATCH_UNITS)
-	State.Sending = true
-	State.SendToken += 1
-	local token = State.SendToken
-	SendButton.Text = "STOP"
-	SendButton.BackgroundColor3 = COLORS.Red
-	ClearButton.Active = false
+	if State.Sending then State.SendToken += 1; setStatus("Stopping after the current server response...", COLORS.Yellow); return end
+	if not State.Resolved then setStatus("Resolve a recipient first", COLORS.Red); return end
+	if not MailboxFlags.OpenEnabled:Get() then setStatus("The game's mailbox is currently unavailable", COLORS.Red); return end
+	if queueUnits() <= 0 then setStatus("Queue at least one item", COLORS.Red); return end
+	local availableByKey = {}; for _, item in ipairs(inventoryEntries()) do availableByKey[item.Key] = item.Available end
+	for key, entry in pairs(State.Queue) do if entry.Selected > (availableByKey[key] or 0) then setStatus("Inventory changed: reduce or re-add " .. entry.DisplayName .. " before sending", COLORS.Red); rebuildInventoryUI(); return end end
+	local recipient = { UserId = State.Resolved.UserId, Username = State.Resolved.Username, DisplayName = State.Resolved.DisplayName }
+	local note = clampUtf8(NoteBox.Text, NOTE_CODEPOINT_LIMIT); local job = buildJob(); local total = queueUnits(); local expectedBatches = math.ceil(total / SERVER_BATCH_UNITS)
+	State.Sending = true; State.SendToken += 1; local token = State.SendToken; SendButton.Text = "STOP"; SendButton.BackgroundColor3 = COLORS.Red; ClearButton.Active = false
 	setStatus(string.format("Sending 0/%s units in up to %s batches...", formatNumber(total), formatNumber(expectedBatches)), COLORS.Yellow)
-
 	task.spawn(function()
-		local sentUnits = 0
-		local sentBatches = 0
-		local sentValue = 0
-		local sentItems = {}
-		local finalStatus = "Completed"
-		local failureReason = nil
-		local deliveryUncertain = false
-
+		local sentUnits, sentBatches, sentValue = 0, 0, 0; local sentItems = {}; local finalStatus = "Completed"; local failureReason; local deliveryUncertain = false
 		while not State.Dead and token == State.SendToken do
-			local payload, portions = nextBatch(job)
-			if #payload == 0 then
-				break
-			end
-			local ok, success, message = pcall(function()
-				return Networking.Mailbox.SendBatch:Fire(recipient.UserId, payload, note)
-			end)
-			if State.Dead then
-				return
-			end
-			if not ok then
-				-- A thrown response cannot prove whether the server committed this
-				-- write. Keep the batch queued, but never describe it as unsent.
-				failureReason = "Batch response failed; delivery could not be confirmed"
-				finalStatus = "Delivery uncertain"
-				deliveryUncertain = true
-				break
-			end
-			if success ~= true then
-				failureReason = type(message) == "string" and message ~= "" and message or "Server rejected this batch"
-				finalStatus = "Stopped"
-				break
-			end
-
+			local payload, portions = nextBatch(job); if #payload == 0 then break end
+			local ok, success, message = pcall(function() return Networking.Mailbox.SendBatch:Fire(recipient.UserId, payload, note) end)
+			if State.Dead then return end
+			if not ok then failureReason = "Batch response failed; delivery could not be confirmed"; finalStatus = "Delivery uncertain"; deliveryUncertain = true; break end
+			if success ~= true then failureReason = type(message) == "string" and message ~= "" and message or "Server rejected this batch"; finalStatus = "Stopped"; break end
 			sentBatches += 1
 			for _, portion in ipairs(portions) do
-				local entry = portion.Entry
-				local count = portion.Count
-				entry.Remaining -= count
-				sentUnits += count
-				local queued = State.Queue[entry.Key]
-				if queued then
-					queued.Selected -= count
-					if queued.Selected <= 0 then
-						State.Queue[entry.Key] = nil
-					end
-				end
-				local historyKey = entry.Category .. "\31" .. entry.DisplayName .. "\31" .. entry.Icon
-				local historyItem = sentItems[historyKey]
-				if not historyItem then
-					historyItem = {
-						Name = entry.DisplayName,
-						Category = entry.Category,
-						Icon = entry.Icon,
-						Count = 0,
-						Value = 0,
-					}
-					sentItems[historyKey] = historyItem
-				end
+				local entry, count = portion.Entry, portion.Count; entry.Remaining -= count; sentUnits += count
+				local queued = State.Queue[entry.Key]; if queued then queued.Selected -= count; if queued.Selected <= 0 then State.Queue[entry.Key] = nil end end
+				local historyKey = entry.Category .. "\31" .. entry.DisplayName .. "\31" .. entry.Icon; local historyItem = sentItems[historyKey]
+				if not historyItem then historyItem = { Name = entry.DisplayName, Category = entry.Category, Icon = entry.Icon, Count = 0, Value = 0 }; sentItems[historyKey] = historyItem end
 				historyItem.Count += count
-				if entry.Category == "HarvestedFruits" then
-					local value = fruitLiveValue(entry.EntryValue, entry.ItemKey) * count
-					historyItem.Value += value
-					sentValue += value
-				end
+				if entry.Category == FRUIT_CATEGORY then local value = fruitLiveValue(entry.EntryValue, entry.ItemKey) * count; historyItem.Value += value; sentValue += value end
 			end
-
-			rebuildInventoryUI()
-			rebuildQueueUI()
-			setStatus(string.format("Sent %s/%s units | batch %s/%s", formatNumber(sentUnits), formatNumber(total), formatNumber(sentBatches), formatNumber(expectedBatches)), COLORS.Yellow)
-			if sentUnits < total and token == State.SendToken then
-				task.wait(BATCH_DELAY)
-			end
+			rebuildInventoryUI(); rebuildQueueUI(); setStatus(string.format("Sent %s/%s units | batch %s/%s", formatNumber(sentUnits), formatNumber(total), formatNumber(sentBatches), formatNumber(expectedBatches)), COLORS.Yellow)
+			if sentUnits < total and token == State.SendToken then task.wait(BATCH_DELAY) end
 		end
-
-		if token ~= State.SendToken and sentUnits < total then
-			finalStatus = "Stopped"
-			failureReason = failureReason or "Stopped by user"
-		end
+		if token ~= State.SendToken and sentUnits < total then finalStatus = "Stopped"; failureReason = failureReason or "Stopped by user" end
 		addHistory(recipient, note, sentItems, sentUnits, sentBatches, sentValue, finalStatus)
-		if State.Dead then
-			return
-		end
-		State.Sending = false
-		SendButton.Text = "Send queued items"
-		SendButton.BackgroundColor3 = COLORS.Green2
-		ClearButton.Active = true
-		if deliveryUncertain then
-			setStatus(string.format("%s. Confirm inventory or mail state before retrying; the unconfirmed batch remains queued. Confirmed sent: %s units.", failureReason, formatNumber(sentUnits)), COLORS.Red)
-		elseif failureReason then
-			setStatus(string.format("%s. Sent %s units; unsent items remain queued.", failureReason, formatNumber(sentUnits)), COLORS.Red)
-		else
-			setStatus(string.format("Finished: sent %s units in %s batches", formatNumber(sentUnits), formatNumber(sentBatches)), COLORS.Green)
-		end
-		rebuildInventoryUI()
-		rebuildQueueUI()
+		if State.Dead then return end
+		State.Sending = false; SendButton.Text = "Send queued items"; SendButton.BackgroundColor3 = COLORS.Green2; ClearButton.Active = true
+		if deliveryUncertain then setStatus(string.format("%s. Confirm inventory or mail state before retrying; the unconfirmed batch remains queued. Confirmed sent: %s units.", failureReason, formatNumber(sentUnits)), COLORS.Red)
+		elseif failureReason then setStatus(string.format("%s. Sent %s units; unsent items remain queued.", failureReason, formatNumber(sentUnits)), COLORS.Red)
+		else setStatus(string.format("Finished: sent %s units in %s batches", formatNumber(sentUnits), formatNumber(sentBatches)), COLORS.Green) end
+		rebuildInventoryUI(); rebuildQueueUI()
 	end)
 end
 
 track(CloseButton.Activated:Connect(cleanup))
-local minimized = false
-local activePage = "Compose"
-local WINDOW_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local minimized = false; local activePage = "Compose"
+local WINDOW_TWEEN = TweenInfo.new(0.34, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut)
 local BUBBLE_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-
-local function playTween(instance, tweenInfo, goals)
-	local tween = TweenService:Create(instance, tweenInfo, goals)
-	tween:Play()
-	return tween
-end
-
+local windowRestorePosition = Window.Position
+local function playTween(instance, tweenInfo, goals) local tween = TweenService:Create(instance, tweenInfo, goals); tween:Play(); return tween end
 local function setMinimized(value)
 	local shouldMinimize = value == true
-	if transitionInProgress or minimized == shouldMinimize then
-		return
-	end
+	if transitionInProgress or minimized == shouldMinimize then return end
 	transitionInProgress = true
-
 	if shouldMinimize then
-		minimized = true
-		local scaleTween = playTween(Scale, WINDOW_TWEEN, { Scale = math.max(0.04, responsiveScale * 0.08) })
-		playTween(Window, WINDOW_TWEEN, { Rotation = 18 })
-		scaleTween.Completed:Wait()
-		if State.Dead then
-			return
-		end
-		Window.Visible = false
-		Window.Rotation = 0
-		Scale.Scale = responsiveScale
-
-		MinimizedBubble.Size = UDim2.fromOffset(12, 12)
-		MinimizedBubble.Rotation = -180
-		MinimizedBubble.Visible = true
-		local bubbleTween = playTween(MinimizedBubble, BUBBLE_TWEEN, {
-			Size = UDim2.fromOffset(58, 58),
-			Rotation = 0,
-		})
-		bubbleTween.Completed:Wait()
+		minimized = true; windowRestorePosition = Window.Position
+		local targetPosition = MinimizedBubble.Position
+		local scaleTween = playTween(Scale, WINDOW_TWEEN, { Scale = math.max(0.035, responsiveScale * 0.055) })
+		local moveTween = playTween(Window, WINDOW_TWEEN, { Position = targetPosition, Rotation = 540 })
+		moveTween.Completed:Wait()
+		if State.Dead then return end
+		Window.Visible = false; Window.Rotation = 0; Window.Position = windowRestorePosition; Scale.Scale = responsiveScale
+		MinimizedBubble.Size = UDim2.fromOffset(10, 10); MinimizedBubble.Rotation = -180; MinimizedBubble.Visible = true
+		playTween(MinimizedBubble, BUBBLE_TWEEN, { Size = UDim2.fromOffset(58, 58), Rotation = 0 }).Completed:Wait()
 	else
-		local bubbleTween = playTween(MinimizedBubble, WINDOW_TWEEN, {
-			Size = UDim2.fromOffset(12, 12),
-			Rotation = 180,
-		})
-		bubbleTween.Completed:Wait()
-		if State.Dead then
-			return
-		end
-		MinimizedBubble.Visible = false
-		MinimizedBubble.Size = UDim2.fromOffset(58, 58)
-		MinimizedBubble.Rotation = 0
-
-		Window.Visible = true
-		Window.Rotation = -18
-		Scale.Scale = math.max(0.04, responsiveScale * 0.08)
+		local origin = MinimizedBubble.Position
+		playTween(MinimizedBubble, WINDOW_TWEEN, { Size = UDim2.fromOffset(10, 10), Rotation = 180 }).Completed:Wait()
+		if State.Dead then return end
+		MinimizedBubble.Visible = false; MinimizedBubble.Size = UDim2.fromOffset(58, 58); MinimizedBubble.Rotation = 0
+		Window.Position = origin; Window.Visible = true; Window.Rotation = -540; Scale.Scale = math.max(0.035, responsiveScale * 0.055)
 		local scaleTween = playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale })
-		playTween(Window, BUBBLE_TWEEN, { Rotation = 0 })
-		scaleTween.Completed:Wait()
-		minimized = false
+		local moveTween = playTween(Window, WINDOW_TWEEN, { Position = windowRestorePosition, Rotation = 0 })
+		moveTween.Completed:Wait(); minimized = false
 	end
-
 	transitionInProgress = false
 end
 
 task.defer(function()
-	if State.Dead then
-		return
-	end
-	transitionInProgress = true
-	Window.Rotation = -12
-	Scale.Scale = math.max(0.04, responsiveScale * 0.18)
-	local scaleTween = playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale })
-	playTween(Window, BUBBLE_TWEEN, { Rotation = 0 })
-	scaleTween.Completed:Wait()
-	transitionInProgress = false
+	if State.Dead then return end
+	transitionInProgress = true; Window.Rotation = -12; Scale.Scale = math.max(0.04, responsiveScale * 0.18)
+	local scaleTween = playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale }); playTween(Window, BUBBLE_TWEEN, { Rotation = 0 }); scaleTween.Completed:Wait(); transitionInProgress = false
 end)
+track(MinimizeButton.Activated:Connect(function() setMinimized(true) end))
 
-track(MinimizeButton.Activated:Connect(function()
-	setMinimized(true)
-end))
-
-local dragging = false
-local dragStart
-local startPosition
-local bubbleDragging = false
-local bubbleMoved = false
-local bubbleDragStart
-local bubbleStartCenter
-
-track(Header.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = true
-		dragStart = input.Position
-		startPosition = Window.Position
-	end
-end))
-
-track(MinimizedBubble.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		bubbleDragging = true
-		bubbleMoved = false
-		bubbleDragStart = input.Position
-		bubbleStartCenter = Vector2.new(
-			MinimizedBubble.AbsolutePosition.X + MinimizedBubble.AbsoluteSize.X * 0.5,
-			MinimizedBubble.AbsolutePosition.Y + MinimizedBubble.AbsoluteSize.Y * 0.5
-		)
-	end
-end))
-
+local dragging = false; local dragStart; local startPosition; local bubbleDragging = false; local bubbleMoved = false; local bubbleDragStart; local bubbleStartCenter
+track(Header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; dragStart = input.Position; startPosition = Window.Position end end))
+track(MinimizedBubble.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then bubbleDragging = true; bubbleMoved = false; bubbleDragStart = input.Position; bubbleStartCenter = Vector2.new(MinimizedBubble.AbsolutePosition.X + MinimizedBubble.AbsoluteSize.X * 0.5, MinimizedBubble.AbsolutePosition.Y + MinimizedBubble.AbsoluteSize.Y * 0.5) end end))
 track(UserInputService.InputChanged:Connect(function(input)
 	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-		local delta = input.Position - dragStart
-		Window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X / Scale.Scale, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y / Scale.Scale)
+		local delta = input.Position - dragStart; Window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X / Scale.Scale, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y / Scale.Scale)
 	elseif bubbleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-		local delta = input.Position - bubbleDragStart
-		if delta.Magnitude > 6 then
-			bubbleMoved = true
-		end
-		local camera = workspace.CurrentCamera
-		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-		local radius = MinimizedBubble.AbsoluteSize.X * 0.5
-		local padding = 8
-		local centerX = math.clamp(bubbleStartCenter.X + delta.X, radius + padding, viewport.X - radius - padding)
-		local centerY = math.clamp(bubbleStartCenter.Y + delta.Y, radius + padding, viewport.Y - radius - padding)
+		local delta = input.Position - bubbleDragStart; if delta.Magnitude > 6 then bubbleMoved = true end
+		local camera = workspace.CurrentCamera; local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720); local radius = MinimizedBubble.AbsoluteSize.X * 0.5; local padding = 8
+		local centerX = math.clamp(bubbleStartCenter.X + delta.X, radius + padding, viewport.X - radius - padding); local centerY = math.clamp(bubbleStartCenter.Y + delta.Y, radius + padding, viewport.Y - radius - padding)
 		MinimizedBubble.Position = UDim2.fromOffset(centerX, centerY)
 	end
 end))
-
-track(UserInputService.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = false
-		bubbleDragging = false
-	end
-end))
-
-track(MinimizedBubble.Activated:Connect(function()
-	if not bubbleMoved then
-		setMinimized(false)
-	end
-end))
-track(UserInputService.InputBegan:Connect(function(input, processed)
-	if not processed and input.KeyCode == Enum.KeyCode.RightShift then
-		ScreenGui.Enabled = not ScreenGui.Enabled
-	end
-end))
+track(UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false; bubbleDragging = false end end))
+track(MinimizedBubble.Activated:Connect(function() if not bubbleMoved then setMinimized(false) end end))
+track(UserInputService.InputBegan:Connect(function(input, processed) if not processed and input.KeyCode == Enum.KeyCode.RightShift then ScreenGui.Enabled = not ScreenGui.Enabled end end))
 
 local function showPage(name)
-	activePage = name
-	local compose = name == "Compose"
-	Compose.Visible = compose
-	HistoryPage.Visible = not compose
-	ComposeTab.BackgroundColor3 = compose and COLORS.Green2 or COLORS.Panel2
-	HistoryTab.BackgroundColor3 = compose and COLORS.Panel2 or COLORS.Green2
-	if not compose then
-		rebuildHistoryUI()
-	end
+	activePage = name; local compose = name == "Compose"; Compose.Visible = compose; HistoryPage.Visible = not compose; ComposeTab.BackgroundColor3 = compose and COLORS.Green2 or COLORS.Panel2; HistoryTab.BackgroundColor3 = compose and COLORS.Panel2 or COLORS.Green2
+	if not compose then rebuildHistoryUI() end
 end
-track(ComposeTab.Activated:Connect(function() showPage("Compose") end))
-track(HistoryTab.Activated:Connect(function() showPage("History") end))
-track(ResolveButton.Activated:Connect(resolveRecipient))
-track(UsernameBox.FocusLost:Connect(function(enterPressed)
-	if enterPressed then
-		resolveRecipient()
-	end
-end))
-track(UsernameBox:GetPropertyChangedSignal("Text"):Connect(function()
-	resolveToken += 1
-	resetRecipientUI("No recipient selected", COLORS.Muted)
-end))
-track(InventorySearch:GetPropertyChangedSignal("Text"):Connect(function()
-	rebuildInventoryUI()
-end))
-for name, filterButton in pairs(FilterButtons) do
-	track(filterButton.Activated:Connect(function()
-		State.Filter = name
-		for otherName, otherButton in pairs(FilterButtons) do
-			otherButton.BackgroundColor3 = otherName == name and COLORS.Green2 or COLORS.Panel2
-		end
-		rebuildInventoryUI()
-	end))
-end
-track(ClearButton.Activated:Connect(function()
-	if State.Sending then
-		return
-	end
-	table.clear(State.Queue)
-	rebuildInventoryUI()
-	rebuildQueueUI()
-	setStatus("Queue cleared")
-end))
-track(NoteBox:GetPropertyChangedSignal("Text"):Connect(function()
-	local clamped = clampUtf8(NoteBox.Text, NOTE_CODEPOINT_LIMIT)
-	if clamped ~= NoteBox.Text then
-		NoteBox.Text = clamped
-	end
-	NoteCounter.Text = tostring(utf8.len(NoteBox.Text) or #NoteBox.Text) .. "/100"
-end))
-track(SendButton.Activated:Connect(beginSend))
-track(HistorySearch:GetPropertyChangedSignal("Text"):Connect(function()
-	rebuildHistoryUI()
-end))
-track(ClearHistoryButton.Activated:Connect(function()
-	table.clear(History)
-	saveHistory()
-	rebuildHistoryUI()
-	setStatus("Mail history cleared")
-end))
+track(ComposeTab.Activated:Connect(function() showPage("Compose") end)); track(HistoryTab.Activated:Connect(function() showPage("History") end)); track(ResolveButton.Activated:Connect(resolveRecipient))
+track(UsernameBox.FocusLost:Connect(function(enterPressed) if enterPressed then resolveRecipient() end end))
+track(UsernameBox:GetPropertyChangedSignal("Text"):Connect(function() resolveToken += 1; resetRecipientUI("No recipient selected", COLORS.Muted) end))
+track(InventorySearch:GetPropertyChangedSignal("Text"):Connect(function() rebuildInventoryUI() end))
+for name, filterButton in pairs(FilterButtons) do track(filterButton.Activated:Connect(function() State.Filter = name; for otherName, otherButton in pairs(FilterButtons) do otherButton.BackgroundColor3 = otherName == name and COLORS.Green2 or COLORS.Panel2 end; rebuildInventoryUI() end)) end
+track(ClearButton.Activated:Connect(function() if State.Sending then return end; table.clear(State.Queue); rebuildInventoryUI(); rebuildQueueUI(); setStatus("Queue cleared") end))
+track(NoteBox:GetPropertyChangedSignal("Text"):Connect(function() local clamped = clampUtf8(NoteBox.Text, NOTE_CODEPOINT_LIMIT); if clamped ~= NoteBox.Text then NoteBox.Text = clamped end; NoteCounter.Text = tostring(utf8.len(NoteBox.Text) or #NoteBox.Text) .. "/100" end))
+track(SendButton.Activated:Connect(beginSend)); track(HistorySearch:GetPropertyChangedSignal("Text"):Connect(function() rebuildHistoryUI() end))
+track(ClearHistoryButton.Activated:Connect(function() table.clear(History); saveHistory(); rebuildHistoryUI(); setStatus("Mail history cleared") end))
 
-track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
-requestStockSnapshot()
+track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot)); requestStockSnapshot()
+task.spawn(function() while not State.Dead do updateStockTimer(); local serverNow = os.time() + State.Stock.ClockOffset; if State.Stock.NextRefreshUnix <= serverNow then requestStockSnapshot() end; task.wait(1) end end)
 
-task.spawn(function()
-	while not State.Dead do
-		updateStockTimer()
-		local serverNow = os.time() + State.Stock.ClockOffset
-		if State.Stock.NextRefreshUnix <= serverNow then
-			requestStockSnapshot()
-		end
-		task.wait(1)
-	end
-end)
-
--- Replica changes do not expose a stable public signal in this build. Include
--- item identity and value-affecting fruit fields so equal-count swaps and
--- in-place fruit updates cannot leave the selector or queued totals stale.
 local function inventoryFingerprint()
-	local categoryParts = {}
-	local inventory = getInventory()
-	for _, category in ipairs(MailboxItemCatalog.Categories) do
-		if category ~= "Pets" and type(inventory[category]) == "table" then
-			local itemParts = {}
-			for itemKey, value in pairs(inventory[category]) do
-				if type(value) == "table" then
-					itemParts[#itemParts + 1] = table.concat({
-						tostring(itemKey),
-						tostring(value.Id or ""),
-						tostring(value.FruitName or value.Name or ""),
-						tostring(value.Mutation or ""),
-						tostring(value.Weight or ""),
-						tostring(value.SizeMultiplier or ""),
-						tostring(value.DecayAlpha or ""),
-					}, "\30")
-				else
-					itemParts[#itemParts + 1] = tostring(itemKey) .. "\30" .. tostring(value)
-				end
-			end
-			table.sort(itemParts)
-			categoryParts[#categoryParts + 1] = category .. "\29" .. table.concat(itemParts, "\28")
-		end
-	end
-	table.sort(categoryParts)
-	return table.concat(categoryParts, "\27")
-end
-
-local function syncQueuedMetadata()
-	local currentByKey = {}
+	local parts = {}
 	for _, item in ipairs(inventoryEntries()) do
-		currentByKey[item.Key] = item
+		local value = item.EntryValue
+		parts[#parts + 1] = table.concat({
+			item.Key,
+			tostring(item.Available),
+			tostring(type(value) == "table" and firstField(value, FRUIT_NAME_FIELDS) or ""),
+			tostring(type(value) == "table" and firstField(value, FRUIT_ID_FIELDS) or ""),
+			tostring(type(value) == "table" and firstField(value, FRUIT_MUTATION_FIELDS) or ""),
+			tostring(type(value) == "table" and firstField(value, FRUIT_WEIGHT_FIELDS) or ""),
+			tostring(type(value) == "table" and firstField(value, FRUIT_SIZE_FIELDS) or ""),
+			tostring(type(value) == "table" and firstField(value, FRUIT_DECAY_FIELDS) or ""),
+		}, "\30")
 	end
-	for key, queued in pairs(State.Queue) do
-		local current = currentByKey[key]
-		if current then
-			queued.EntryValue = current.EntryValue
-			queued.DisplayName = current.DisplayName
-			queued.Icon = current.Icon
-		end
-	end
+	table.sort(parts); return table.concat(parts, "\27")
 end
-
+local function syncQueuedMetadata()
+	local currentByKey = {}; for _, item in ipairs(inventoryEntries()) do currentByKey[item.Key] = item end
+	for key, queued in pairs(State.Queue) do local current = currentByKey[key]; if current then queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon end end
+end
 task.spawn(function()
 	local lastFingerprint = ""
 	while not State.Dead do
 		local fingerprint = inventoryFingerprint()
-		if fingerprint ~= lastFingerprint then
-			lastFingerprint = fingerprint
-			syncQueuedMetadata()
-			rebuildInventoryUI()
-			rebuildQueueUI()
-		end
-		task.wait(1.5)
+		if fingerprint ~= lastFingerprint then lastFingerprint = fingerprint; syncQueuedMetadata(); rebuildInventoryUI(); rebuildQueueUI() end
+		task.wait(1.25)
 	end
 end)
 
-rebuildInventoryUI()
-rebuildQueueUI()
-rebuildHistoryUI()
-updateStockTimer()
-setStatus("Ready | Right Shift toggles the UI", COLORS.Green)
+rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); updateStockTimer(); setStatus("Ready | grown fruits + live values enabled | Right Shift toggles UI", COLORS.Green)
