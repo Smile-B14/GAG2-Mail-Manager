@@ -35,11 +35,14 @@ local State = {
 	Filter = "All",
 	InventoryCache = {},
 	InventoryScanToken = 0,
+	InventoryScanning = false,
+	InventoryRefreshRequested = false,
 	PlantCatalog = {
 		Names = {},
 		Display = {},
 		Ready = false,
 		Scanning = false,
+		ScanToken = 0,
 		ScannedModules = 0,
 		TotalModules = 0,
 	},
@@ -115,12 +118,14 @@ local Replica = PlayerStateClient:WaitForLocalReplica(30)
 assert(Replica and Replica.Data and Replica.Data.Inventory, "Player inventory replica did not load")
 
 local FRUIT_CATEGORY = "HarvestedFruits"
-local MAX_QUEUE_UNITS = 100000
 local NOTE_CODEPOINT_LIMIT = 100
 local SEND_RESPONSE_TIMEOUT = 8
 local SEND_RECONCILE_SECONDS = 2.5
 local HISTORY_LIMIT = 250
 local CATALOG_MODULE_BATCH = 3
+local CATALOG_REQUIRE_TIMEOUT = 0.75
+local CATALOG_DISCOVERY_BATCH = 250
+local CATALOG_ASSET_BATCH = 20
 local INVENTORY_SCAN_BATCH = 120
 local UI_ROW_BATCH = 12
 
@@ -220,10 +225,26 @@ local function stripSeedSuffix(name)
 	return trim((name:gsub("%s+seeds?$", "")))
 end
 
+local NON_ITEM_CATALOG_KEYS = {
+	name = true, displayname = true, fruitname = true, plantname = true, seedname = true, cropname = true,
+	icon = true, image = true, price = true, basevalue = true, rarity = true, growthtime = true,
+	weight = true, sizemultiplier = true, mutation = true, decayalpha = true, count = true,
+	items = true, entries = true, categories = true, metadata = true, config = true, settings = true,
+}
+local function looksLikePlantName(value)
+	if type(value) ~= "string" then return false end
+	local display = trim(value)
+	if #display < 2 or #display > 80 or not display:match("%a") then return false end
+	if display:find("/", 1, true) or display:find("\\", 1, true) or display:find(".", 1, true) then return false end
+	local normalized = normalizeName(display)
+	if NON_ITEM_CATALOG_KEYS[normalized:gsub("%s+", "")] then return false end
+	if #display >= 24 and display:match("^[%x_%-]+$") then return false end
+	return true
+end
+
 local function addPlantName(name)
-	if type(name) ~= "string" then return end
+	if not looksLikePlantName(name) then return end
 	local display = trim(name)
-	if #display < 2 or #display > 80 then return end
 	local normalized = normalizeName(display)
 	if normalized == "" then return end
 	State.PlantCatalog.Names[normalized] = true
@@ -251,13 +272,17 @@ local function harvestCatalogTable(value, depth, strongContext)
 	for key, child in pairs(value) do
 		visited += 1
 		if type(child) == "table" then
-			if type(key) == "string" and (strongContext or tableLooksLikeItemDefinition(child)) then addPlantName(key) end
+			local childLooksLikeItem = tableLooksLikeItemDefinition(child)
+			if type(key) == "string" and (childLooksLikeItem or (strongContext and depth <= 2)) then addPlantName(key) end
 			for _, field in ipairs({ "DisplayName", "Name", "FruitName", "PlantName", "SeedName", "CropName" }) do
 				if type(child[field]) == "string" then addPlantName(child[field]) end
 			end
-			harvestCatalogTable(child, depth + 1, strongContext)
+			local keyText = type(key) == "string" and string.lower(key) or ""
+			local childContext = strongContext or keyText:find("fruit", 1, true) ~= nil or keyText:find("plant", 1, true) ~= nil
+				or keyText:find("crop", 1, true) ~= nil or keyText:find("seed", 1, true) ~= nil or keyText:find("produce", 1, true) ~= nil
+			harvestCatalogTable(child, depth + 1, childContext)
 		elseif type(key) == "string" and strongContext and (type(child) == "number" or type(child) == "string") then
-			if #key >= 2 and not key:match("^[A-Z_]+$") then addPlantName(key) end
+			addPlantName(key)
 		end
 		if visited % 200 == 0 then task.wait() end
 	end
@@ -279,30 +304,82 @@ local function updateCatalogInfo()
 	end
 end
 
-local function moduleIsCatalogCandidate(module)
+local function catalogModulePriority(module)
 	local text = string.lower(module:GetFullName())
-	return text:find("fruit", 1, true) or text:find("plant", 1, true) or text:find("crop", 1, true)
-		or text:find("seed", 1, true) or text:find("produce", 1, true) or text:find("harvest", 1, true)
+	if text:find("fruit", 1, true) or text:find("plant", 1, true) or text:find("crop", 1, true)
+		or text:find("seed", 1, true) or text:find("produce", 1, true) or text:find("harvest", 1, true) then return 1 end
+	if text:find("catalog", 1, true) or text:find("item", 1, true) or text:find("data", 1, true)
+		or text:find("config", 1, true) or text:find("definition", 1, true) or text:find("asset", 1, true) then return 2 end
+	return nil
+end
+
+local function requireCatalogModule(module, token)
+	local result = { Done = false }
+	task.spawn(function()
+		local ok, data = pcall(require, module)
+		result.Ok, result.Data, result.Done = ok, data, true
+	end)
+	local deadline = os.clock() + CATALOG_REQUIRE_TIMEOUT
+	while not result.Done and not State.Dead and token == State.PlantCatalog.ScanToken and os.clock() < deadline do task.wait(0.03) end
+	if result.Done and result.Ok and type(result.Data) == "table" then return result.Data end
+	return nil
+end
+
+local function scanAssetCatalog(token)
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	if not assets then return end
+	local visited = 0
+	for _, folderName in ipairs({ "Fruits", "Plants", "Seeds" }) do
+		local folder = assets:FindFirstChild(folderName)
+		if folder then
+			for _, asset in ipairs(folder:GetChildren()) do
+				if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
+				local name = folderName == "Seeds" and stripSeedSuffix(asset.Name) or asset.Name
+				addPlantName(name)
+				for _, attributeName in ipairs({ "FruitName", "PlantName", "SeedName", "CropName", "DisplayName" }) do
+					local attribute = asset:GetAttribute(attributeName)
+					if type(attribute) == "string" then addPlantName(stripSeedSuffix(attribute)) end
+				end
+				visited += 1
+				if visited % CATALOG_ASSET_BATCH == 0 then updateCatalogInfo(); task.wait() end
+			end
+		end
+	end
 end
 
 local function scanPlantCatalog()
 	if State.PlantCatalog.Scanning then return end
 	State.PlantCatalog.Scanning = true
 	State.PlantCatalog.Ready = false
+	State.PlantCatalog.ScanToken += 1
+	local token = State.PlantCatalog.ScanToken
+	scanAssetCatalog(token)
+	if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
 	local modules = {}
-	for _, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
-		if descendant:IsA("ModuleScript") and moduleIsCatalogCandidate(descendant) then modules[#modules + 1] = descendant end
+	for index, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
+		if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
+		if descendant:IsA("ModuleScript") then
+			local priority = catalogModulePriority(descendant)
+			if priority then modules[#modules + 1] = { Module = descendant, Priority = priority } end
+		end
+		if index % CATALOG_DISCOVERY_BATCH == 0 then updateCatalogInfo(); task.wait() end
 	end
+	table.sort(modules, function(a, b)
+		if a.Priority ~= b.Priority then return a.Priority < b.Priority end
+		return a.Module:GetFullName() < b.Module:GetFullName()
+	end)
 	State.PlantCatalog.TotalModules = #modules
 	State.PlantCatalog.ScannedModules = 0
 	updateCatalogInfo()
 	task.spawn(function()
-		for index, module in ipairs(modules) do
-			if State.Dead then return end
-			local ok, data = pcall(require, module)
-			if ok and type(data) == "table" then
+		for index, candidate in ipairs(modules) do
+			if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
+			local module = candidate.Module
+			local data = requireCatalogModule(module, token)
+			if data then
 				local path = string.lower(module:GetFullName())
 				local strong = path:find("fruit", 1, true) ~= nil or path:find("plant", 1, true) ~= nil or path:find("crop", 1, true) ~= nil
+					or path:find("seed", 1, true) ~= nil or path:find("produce", 1, true) ~= nil or path:find("harvest", 1, true) ~= nil
 				harvestCatalogTable(data, 0, strong)
 			end
 			State.PlantCatalog.ScannedModules = index
@@ -312,6 +389,7 @@ local function scanPlantCatalog()
 				task.wait()
 			end
 		end
+		if token ~= State.PlantCatalog.ScanToken then return end
 		State.PlantCatalog.Scanning = false
 		State.PlantCatalog.Ready = true
 		updateCatalogInfo()
@@ -390,6 +468,33 @@ local function entryCatalogName(containerKey, entryValue)
 	return bestCatalogMatch(explicit or (type(containerKey) == "string" and containerKey or ""))
 end
 
+local function inventoryScanActive(token)
+	return not State.Dead and token == State.InventoryScanToken
+end
+
+local function learnPlantNamesFromInventory(container, depth, path, counter, token)
+	if type(container) ~= "table" or depth > 8 or not inventoryScanActive(token) then return end
+	for containerKey, entryValue in pairs(container) do
+		counter.n += 1
+		if counter.n % INVENTORY_SCAN_BATCH == 0 then
+			task.wait()
+			if not inventoryScanActive(token) then return end
+		end
+		if type(entryValue) == "table" then
+			local childPath = path .. "/" .. tostring(containerKey)
+			local pathLower = string.lower(childPath)
+			local fruitContext = pathLower:find("fruit", 1, true) or pathLower:find("harvest", 1, true)
+				or pathLower:find("produce", 1, true) or pathLower:find("crop", 1, true)
+			local explicit = firstField(entryValue, NAME_FIELDS)
+			if fruitContext or fruitSignalScore(entryValue) >= 3 then
+				if type(explicit) == "string" then addPlantName(explicit) end
+				if fruitContext and type(containerKey) == "string" then addPlantName(containerKey) end
+			end
+			learnPlantNamesFromInventory(entryValue, depth + 1, childPath, counter, token)
+		end
+	end
+end
+
 local function normalizeImage(image)
 	if type(image) == "number" and image > 0 then return "rbxassetid://" .. tostring(math.floor(image)) end
 	if type(image) == "string" then if image:match("^%d+$") then return "rbxassetid://" .. image end; return image end
@@ -446,7 +551,8 @@ end
 local function addFruitCandidate(output, seen, containerKey, entryValue, source, iconOverride, forcedName)
 	if type(entryValue) ~= "table" then return end
 	local id = fuzzyId(entryValue)
-	local itemKey = id or containerKey
+	local itemKey = containerKey
+	if itemKey == nil or type(itemKey) == "number" then itemKey = id or itemKey end
 	if itemKey == nil then return end
 	-- Numeric array positions are not safe transport IDs unless an explicit ID exists.
 	if type(containerKey) == "number" and id == nil then return end
@@ -457,12 +563,14 @@ local function addFruitCandidate(output, seen, containerKey, entryValue, source,
 	output[#output + 1] = { ItemKey = itemKey, EntryValue = normalized, Available = fruitAvailable(normalized), Source = source, Icon = normalizeImage(iconOverride) }
 end
 
-local function collectFruitEntries(container, output, seen, depth, path, counter)
-	if type(container) ~= "table" or depth > 8 then return end
+local function collectFruitEntries(container, output, seen, depth, path, counter, token)
+	if type(container) ~= "table" or depth > 8 or not inventoryScanActive(token) then return end
 	for containerKey, entryValue in pairs(container) do
 		counter.n += 1
-		if counter.n % INVENTORY_SCAN_BATCH == 0 then task.wait() end
-		if State.Dead then return end
+		if counter.n % INVENTORY_SCAN_BATCH == 0 then
+			task.wait()
+			if not inventoryScanActive(token) then return end
+		end
 		local childPath = path .. "/" .. tostring(containerKey)
 		if type(entryValue) == "table" then
 			local nameMatch = entryCatalogName(containerKey, entryValue)
@@ -472,7 +580,7 @@ local function collectFruitEntries(container, output, seen, depth, path, counter
 			if not pathIsNonFruit(childPath) and (score >= 4 or fruitContext or nameMatch) then
 				addFruitCandidate(output, seen, containerKey, entryValue, childPath, nil, nameMatch and State.PlantCatalog.Display[nameMatch] or nil)
 			else
-				collectFruitEntries(entryValue, output, seen, depth + 1, childPath, counter)
+				collectFruitEntries(entryValue, output, seen, depth + 1, childPath, counter, token)
 			end
 		end
 	end
@@ -495,10 +603,11 @@ local function toolData(tool)
 	data.DisplayName = data.DisplayName or tool.Name
 	return data, match
 end
-local function collectToolFruits(output, seen)
+local function collectToolFruits(output, seen, token)
 	local function inspect(container)
 		if not container then return end
 		for _, child in ipairs(container:GetChildren()) do
+			if not inventoryScanActive(token) then return end
 			if child:IsA("Tool") then
 				local data, match = toolData(child)
 				if match and fuzzyId(data) ~= nil then addFruitCandidate(output, seen, fuzzyId(data), data, "Tool:" .. child.Name, child.TextureId, State.PlantCatalog.Display[match]) end
@@ -523,15 +632,18 @@ local function groupFor(category)
 	return "Gears"
 end
 
-local function buildInventoryEntries()
+local function buildInventoryEntries(token)
 	local output = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
 	for _, category in ipairs(mailableCategories()) do
+		if not inventoryScanActive(token) then return nil end
 		local categoryData = inventory[category]
 		if type(categoryData) == "table" then
 			for itemKey, entryValue in pairs(categoryData) do
+				if not inventoryScanActive(token) then return nil end
 				local available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
 				if available > 0 then
 					local displayName, icon = resolveItem(category, itemKey, entryValue)
+					if category == "Seeds" then addPlantName(stripSeedSuffix(displayName)) end
 					output[#output + 1] = { Key = category .. "\31" .. tostring(itemKey), Category = category, Group = groupFor(category), ItemKey = itemKey, EntryValue = entryValue, Available = available, DisplayName = displayName, Icon = icon, LiveValue = 0 }
 				end
 			end
@@ -539,10 +651,22 @@ local function buildInventoryEntries()
 		task.wait()
 	end
 	local fruits = {}; local seen = {}; local counter = { n = 0 }
-	local data = Replica and Replica.Data
-	if type(data) == "table" then collectFruitEntries(data, fruits, seen, 0, "Data", counter) end
-	collectToolFruits(fruits, seen)
+	local harvested = inventory[FRUIT_CATEGORY]
+	if type(harvested) == "table" then
+		for itemKey, entryValue in pairs(harvested) do
+			if not inventoryScanActive(token) then return nil end
+			addFruitCandidate(fruits, seen, itemKey, entryValue, "Inventory/" .. FRUIT_CATEGORY)
+		end
+	end
+	if type(inventory) == "table" then
+		learnPlantNamesFromInventory(inventory, 0, "Inventory", { n = 0 }, token)
+		if not inventoryScanActive(token) then return nil end
+		collectFruitEntries(inventory, fruits, seen, 0, "Inventory", counter, token)
+	end
+	if not inventoryScanActive(token) then return nil end
+	collectToolFruits(fruits, seen, token)
 	for _, fruit in ipairs(fruits) do
+		if not inventoryScanActive(token) then return nil end
 		local displayName, icon = resolveItem(FRUIT_CATEGORY, fruit.ItemKey, fruit.EntryValue)
 		if icon == "" then icon = fruit.Icon or "" end
 		output[#output + 1] = {
@@ -660,13 +784,14 @@ local HistoryList = scrolling(HistoryPage, UDim2.fromOffset(0, 48), UDim2.new(1,
 
 local inventoryUiToken = 0
 local function requestedQuantity()
-	local number = tonumber(QuantityBox.Text); if not number or number ~= number then return 1 end
-	return math.clamp(math.floor(number), 1, MAX_QUEUE_UNITS)
+	local number = tonumber(QuantityBox.Text)
+	if not number or number ~= number or number <= 0 then return 1 end
+	return math.max(1, math.floor(number))
 end
 local function queueAdd(item)
 	if State.Sending then setStatus("Stop sending before editing the queue", COLORS.Yellow); return end
 	local current = State.Queue[item.Key]; local already = current and current.Selected or 0
-	local amount = math.min(requestedQuantity(), math.max(0, item.Available - already), math.max(0, MAX_QUEUE_UNITS - queueUnits()))
+	local amount = math.min(requestedQuantity(), math.max(0, item.Available - already))
 	if amount <= 0 then setStatus("That item is already fully queued", COLORS.Yellow); return end
 	if not current then current = { Key = item.Key, Category = item.Category, ItemKey = item.ItemKey, EntryValue = item.EntryValue, DisplayName = item.DisplayName, Icon = item.Icon, Selected = 0 }; State.Queue[item.Key] = current end
 	current.Selected += amount; setStatus(string.format("Queued %s x%s", item.DisplayName, formatNumber(amount)), COLORS.Green); rebuildInventoryUI(); rebuildQueueUI()
@@ -737,16 +862,26 @@ rebuildHistoryUI = function()
 end
 
 requestInventoryRefresh = function()
-	State.InventoryScanToken += 1; local token = State.InventoryScanToken
+	if State.Dead then return end
+	State.InventoryRefreshRequested = true
+	if State.InventoryScanning then return end
+	State.InventoryScanning = true
 	task.spawn(function()
-		task.wait(0.03)
-		if State.Dead or token ~= State.InventoryScanToken then return end
-		local ok, entries = pcall(buildInventoryEntries)
-		if not ok or State.Dead or token ~= State.InventoryScanToken then return end
-		State.InventoryCache = entries
-		local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
-		for key, queued in pairs(State.Queue) do local current = currentByKey[key]; if current then queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon end end
-		rebuildInventoryUI(); rebuildQueueUI()
+		while not State.Dead and State.InventoryRefreshRequested do
+			State.InventoryRefreshRequested = false
+			State.InventoryScanToken += 1; local token = State.InventoryScanToken
+			task.wait(0.03)
+			if State.Dead or token ~= State.InventoryScanToken then break end
+			local ok, entries = pcall(buildInventoryEntries, token)
+			if ok and type(entries) == "table" and not State.Dead and token == State.InventoryScanToken then
+				State.InventoryCache = entries
+				local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
+				for key, queued in pairs(State.Queue) do local current = currentByKey[key]; if current then queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon end end
+				rebuildInventoryUI(); rebuildQueueUI()
+			end
+		end
+		State.InventoryScanning = false
+		if State.InventoryRefreshRequested and not State.Dead then requestInventoryRefresh() end
 	end)
 end
 
@@ -809,6 +944,9 @@ local function queuePayloadAndPortions()
 	end
 	return payload, portions
 end
+local function sendActive(token)
+	return not State.Dead and State.Sending and token == State.SendToken
+end
 local function responseWithTimeout(userId, payload, note, token)
 	local result = { done = false }
 	task.spawn(function()
@@ -816,17 +954,18 @@ local function responseWithTimeout(userId, payload, note, token)
 		result.ok, result.success, result.message, result.done = ok, success, message, true
 	end)
 	local started = os.clock()
-	while not result.done and not State.Dead and token == State.SendToken and os.clock() - started < SEND_RESPONSE_TIMEOUT do task.wait(0.05) end
-	if token ~= State.SendToken then return "cancelled" end
+	while not result.done and sendActive(token) and os.clock() - started < SEND_RESPONSE_TIMEOUT do task.wait(0.05) end
+	if token ~= State.SendToken or not State.Sending then return "cancelled" end
 	if State.Dead then return "dead" end
 	if not result.done then return "timeout" end
 	if not result.ok then return "error", false, result.message end
 	return "response", result.success == true, result.message
 end
-local function reconcileDelivered(portions, before)
+local function reconcileDelivered(portions, before, token)
 	local deadline = os.clock() + SEND_RECONCILE_SECONDS
-	while os.clock() < deadline and not State.Dead do
+	while os.clock() < deadline and sendActive(token) do
 		requestInventoryRefresh(); task.wait(0.35)
+		if not sendActive(token) then return nil end
 		local after = inventoryAvailabilityMap(); local allDropped = true
 		for _, portion in ipairs(portions) do
 			local old = before[portion.Key] or 0; local now = after[portion.Key] or 0
@@ -834,6 +973,7 @@ local function reconcileDelivered(portions, before)
 		end
 		if allDropped then return true end
 	end
+	if not sendActive(token) then return nil end
 	return false
 end
 local function resetSendUi()
@@ -856,7 +996,7 @@ end
 
 local function beginSend()
 	if State.Sending then
-		State.SendToken += 1; resetSendUi(); setStatus("Stopped locally. Any late server response will be ignored.", COLORS.Yellow); return
+		State.SendToken += 1; resetSendUi(); requestInventoryRefresh(); setStatus("Stopped locally. Any late server response will be ignored; inventory is refreshing.", COLORS.Yellow); return
 	end
 	if not State.Resolved then setStatus("Resolve a recipient first", COLORS.Red); return end
 	if not MailboxFlags.OpenEnabled:Get() then setStatus("The game's mailbox is currently unavailable", COLORS.Red); return end
@@ -871,12 +1011,16 @@ local function beginSend()
 		local safeOk, safeError = pcall(function()
 			local kind, success, message = responseWithTimeout(recipient.UserId, payload, note, token)
 			if kind == "cancelled" or kind == "dead" then return end
+			if not sendActive(token) then return end
 			if kind == "response" and success then
+				if not sendActive(token) then return end
 				consumeQueue(portions); recordSent(recipient, note, portions, "Completed"); setStatus("Sent successfully", COLORS.Green); requestInventoryRefresh(); return
 			end
 			if kind == "timeout" or kind == "error" then
 				setStatus("Server response did not finish; checking inventory...", COLORS.Yellow)
-				if reconcileDelivered(portions, before) then
+				local delivered = reconcileDelivered(portions, before, token)
+				if delivered == nil or not sendActive(token) then return end
+				if delivered then
 					consumeQueue(portions); recordSent(recipient, note, portions, "Completed (reconciled)"); setStatus("Sent successfully. Inventory confirmed the delivery.", COLORS.Green)
 				else
 					setStatus("Request finished without a usable response. Queue kept so you can verify before retrying.", COLORS.Red)
