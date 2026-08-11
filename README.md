@@ -23,7 +23,7 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Runtime catalog discovery only from the game's exact `Assets.Fruits`, `Assets.Plants`, and `Assets.Seeds` folders
 - Batched/yielding asset scans to reduce frame stalls
 - Replica-safe startup that reuses the game's already-loaded `PlayerStateClient` before attempting an executor-local module require
-- Live inventory refresh for grown fruits, pets, seeds, and gear
+- Live inventory refresh every second for grown fruits, pets, seeds, gear, and favorite-state changes
 - Grown-fruit discovery from authoritative `Inventory.HarvestedFruits` entries plus exact game-marked `FruitProxyUtil` instances, using stable mailbox IDs
 - Pets come from authoritative `Inventory.Pets`; equipped and favorited pets are excluded
 - Favorited harvested fruit is excluded and removed from stale queues

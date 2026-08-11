@@ -972,5 +972,5 @@ track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
 requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); updateCatalogInfo()
 task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
-task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1.35) end end)
+task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1) end end)
 setStatus("Ready. Building the live plant catalog in the background...", COLORS.Green)
