@@ -25,6 +25,10 @@ local ENV = getgenv and getgenv() or _G
 local STATE_KEY = "SmileB_GAG2MailManager"
 local HISTORY_KEY = "SmileB_GAG2MailHistory"
 local HISTORY_FILE = "SmileB_GAG2_MailHistory.json"
+local AUTO_CONFIG_KEY = "SmileB_GAG2AutoCollect"
+local AutoPreferences = type(ENV[AUTO_CONFIG_KEY]) == "table" and ENV[AUTO_CONFIG_KEY] or {}
+AutoPreferences.Rules = type(AutoPreferences.Rules) == "table" and AutoPreferences.Rules or {}
+ENV[AUTO_CONFIG_KEY] = AutoPreferences
 
 if ENV[STATE_KEY] and ENV[STATE_KEY].Cleanup then
 	pcall(ENV[STATE_KEY].Cleanup)
@@ -46,6 +50,19 @@ local State = {
 	InventoryScanToken = 0,
 	InventoryScanning = false,
 	InventoryRefreshRequested = false,
+	AutoCollect = {
+		Enabled = AutoPreferences.Enabled == true,
+		AutoSell = AutoPreferences.AutoSell == true,
+		Rules = AutoPreferences.Rules,
+		Catalog = {},
+		Cooldowns = {},
+		Harvested = 0,
+		LastPassCount = 0,
+		SellInFlight = false,
+		SellToken = 0,
+		LastSellClock = 0,
+		LastMessage = "Choose produce and enable Auto Collect",
+	},
 	PlantCatalog = {
 		Names = {},
 		Display = {},
@@ -77,6 +94,7 @@ local function cleanup()
 	if State.Dead then return end
 	State.Dead = true
 	State.SendToken += 1
+	State.AutoCollect.SellToken += 1
 	State.InventoryScanToken += 1
 	for _, connection in ipairs(State.Connections) do
 		pcall(function() connection:Disconnect() end)
@@ -245,7 +263,7 @@ local Packet = require(PacketModule)
 local PacketRemote = PacketModule:WaitForChild("RemoteEvent")
 setLoadingProgress(22, "Loading network packets...")
 
-for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitStockSnapshot", "FruitStockRequest" }) do
+for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitStockSnapshot", "FruitStockRequest", "CollectFruit", "SellAll" }) do
 	local deadline = os.clock() + 30
 	while PacketRemote:GetAttribute(packetName) == nil and os.clock() < deadline do
 		task.wait(0.05)
@@ -262,6 +280,12 @@ local Networking = {
 	FruitStock = {
 		Snapshot = Packet("FruitStockSnapshot", Packet.Any),
 		Request = Packet("FruitStockRequest"):Response(Packet.Any),
+	},
+	Garden = {
+		CollectFruit = Packet("CollectFruit", Packet.String, Packet.String),
+	},
+	NPCS = {
+		SellAll = Packet("SellAll"):Response(Packet.Any),
 	},
 }
 
@@ -312,6 +336,9 @@ local FruitProxyUtil = require(SharedModules:WaitForChild("FruitProxyUtil"))
 local MutationData = require(SharedModules:WaitForChild("MutationData"))
 local WeightFormat = require(SharedModules:WaitForChild("WeightFormat"))
 local MailboxFlags = require(SharedModules:WaitForChild("Flags"):WaitForChild("MailboxFlags"))
+local SeedData = require(SharedModules:WaitForChild("SeedData"))
+local FruitIdentity = require(SharedModules:WaitForChild("FruitIdentity"))
+local FruitVisualizerController = require(Controllers:WaitForChild("FruitVisualizerController"))
 setLoadingProgress(60, "Loading game modules...")
 
 local replicaDeadline = os.clock() + 60
@@ -344,6 +371,9 @@ local SEND_RECONCILE_SECONDS = 2.5
 local HISTORY_LIMIT = 250
 local CATALOG_ASSET_BATCH = 20
 local UI_ROW_BATCH = 12
+local AUTO_HARVEST_BATCH = 8
+local AUTO_HARVEST_RETRY_SECONDS = 1.75
+local AUTO_SELL_TIMEOUT = 8
 
 local COLORS = {
 	Back = Color3.fromRGB(15, 18, 24), Panel = Color3.fromRGB(24, 29, 38), Panel2 = Color3.fromRGB(31, 38, 49),
@@ -475,6 +505,7 @@ end
 local rebuildInventoryUI
 local rebuildQueueUI
 local rebuildHistoryUI
+local rebuildAutoCollectUI
 local requestInventoryRefresh
 local CatalogInfo
 
@@ -520,8 +551,25 @@ local function scanPlantCatalog()
 	if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
 	State.PlantCatalog.Scanning = false
 	State.PlantCatalog.Ready = true
+	table.clear(State.AutoCollect.Catalog)
+	for _, seed in pairs(SeedData) do
+		if type(seed) == "table" and type(seed.SeedName) == "string" then
+			local plantName = trim(seed.SeedName)
+			local ok, resolved = pcall(FruitIdentity.ResolveFruitName, plantName)
+			local displayName = ok and type(resolved) == "string" and resolved ~= "" and resolved or plantName
+			local key = normalizeName(displayName)
+			local entry = State.AutoCollect.Catalog[key]
+			if not entry then
+				entry = { Key = key, DisplayName = displayName, PlantNames = {}, IsSingleHarvest = seed.IsSingleHarvest == true }
+				State.AutoCollect.Catalog[key] = entry
+			end
+			entry.PlantNames[normalizeName(plantName)] = true
+			entry.IsSingleHarvest = entry.IsSingleHarvest or seed.IsSingleHarvest == true
+		end
+	end
 	updateCatalogInfo()
 	if requestInventoryRefresh then requestInventoryRefresh() end
+	if rebuildAutoCollectUI then rebuildAutoCollectUI() end
 end
 
 local function firstField(value, fields)
@@ -826,6 +874,7 @@ end
 
 -- UI.
 setLoadingProgress(86, "Building the interface...")
+local AutoUI = {}
 for _, root in ipairs({ LocalPlayer:FindFirstChildOfClass("PlayerGui"), GuiParent, CoreGui }) do
 	if typeof(root) == "Instance" then pcall(function() for _, child in ipairs(root:GetChildren()) do if child:IsA("ScreenGui") and child.Name == "SmileB_GAG2MailManager" then child:Destroy() end end end) end
 end
@@ -864,8 +913,10 @@ corner(MinimizedBubble, 29); stroke(MinimizedBubble, COLORS.Green, 2); new("UIGr
 local Nav = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 54), Size = UDim2.new(1, -24, 0, 34) }, Window)
 local ComposeTab = button(Nav, "Compose", UDim2.fromOffset(0, 0), UDim2.fromOffset(110, 32), COLORS.Green2)
 local HistoryTab = button(Nav, "History", UDim2.fromOffset(118, 0), UDim2.fromOffset(110, 32), COLORS.Panel2)
+AutoUI.Tab = button(Nav, "Auto Collect", UDim2.fromOffset(236, 0), UDim2.fromOffset(126, 32), COLORS.Panel2)
 local Compose = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 94), Size = UDim2.new(1, -24, 1, -122) }, Window)
 local HistoryPage = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
+AutoUI.Page = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
 local Status = label(Window, "Starting...", UDim2.new(0, 14, 1, -27), UDim2.new(1, -28, 0, 22), 12, COLORS.Muted)
 local function setStatus(text, color) Status.Text = tostring(text or ""); Status.TextColor3 = color or COLORS.Muted end
 
@@ -899,6 +950,17 @@ local HistorySearch = box(HistoryPage, "Search history", UDim2.fromOffset(0, 0),
 local ClearHistoryButton = button(HistoryPage, "Clear history", UDim2.new(1, -116, 0, 0), UDim2.fromOffset(116, 38), COLORS.Panel2)
 local HistoryList = scrolling(HistoryPage, UDim2.fromOffset(0, 48), UDim2.new(1, 0, 1, -48))
 
+AutoUI.Header = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, 0, 0, 100) }, AutoUI.Page); corner(AutoUI.Header, 10); stroke(AutoUI.Header)
+label(AutoUI.Header, "Automatic garden collection", UDim2.fromOffset(14, 8), UDim2.fromOffset(260, 24), 15, COLORS.Text)
+AutoUI.EnableButton = button(AutoUI.Header, "Auto Collect: OFF", UDim2.fromOffset(14, 38), UDim2.fromOffset(160, 38), COLORS.Panel2)
+AutoUI.SellButton = button(AutoUI.Header, "Auto Sell: OFF", UDim2.fromOffset(184, 38), UDim2.fromOffset(150, 38), COLORS.Panel2)
+AutoUI.Summary = label(AutoUI.Header, "0 produce selected", UDim2.fromOffset(350, 34), UDim2.new(1, -364, 0, 24), 13, COLORS.Green)
+AutoUI.Status = label(AutoUI.Header, State.AutoCollect.LastMessage, UDim2.fromOffset(350, 58), UDim2.new(1, -364, 0, 25), 12, COLORS.Muted)
+label(AutoUI.Header, "Auto Sell uses the game's Sell All endpoint (favorited fruit stays protected).", UDim2.fromOffset(14, 78), UDim2.new(1, -28, 0, 18), 10, COLORS.Muted)
+AutoUI.Search = box(AutoUI.Page, "Search produce", UDim2.fromOffset(0, 110), UDim2.new(1, 0, 0, 36))
+label(AutoUI.Page, "SELECT     PRODUCE                         THRESHOLD       UNIT                 CONDITION", UDim2.fromOffset(8, 150), UDim2.new(1, -16, 0, 22), 10, COLORS.Muted)
+AutoUI.List = scrolling(AutoUI.Page, UDim2.fromOffset(0, 174), UDim2.new(1, 0, 1, -174))
+
 local inventoryUiToken = 0
 local function requestedQuantity()
 	local number = tonumber(QuantityBox.Text)
@@ -917,6 +979,223 @@ local function queueRemove(key, amount)
 	if State.Sending then return end
 	local entry = State.Queue[key]; if not entry then return end
 	entry.Selected -= amount or 1; if entry.Selected <= 0 then State.Queue[key] = nil end; rebuildInventoryUI(); rebuildQueueUI()
+end
+
+function AutoUI.savePreferences()
+	AutoPreferences.Enabled = State.AutoCollect.Enabled
+	AutoPreferences.AutoSell = State.AutoCollect.AutoSell
+	AutoPreferences.Rules = State.AutoCollect.Rules
+	ENV[AUTO_CONFIG_KEY] = AutoPreferences
+end
+
+function AutoUI.getRule(key)
+	local rule = State.AutoCollect.Rules[key]
+	if type(rule) ~= "table" then
+		rule = {
+			Enabled = false,
+			Threshold = 0,
+			Metric = key:find("bamboo", 1, true) and "Height" or "Kilograms",
+			Mode = "Above",
+		}
+		State.AutoCollect.Rules[key] = rule
+	end
+	rule.Threshold = math.max(0, tonumber(rule.Threshold) or 0)
+	rule.Metric = rule.Metric == "Height" and "Height" or "Kilograms"
+	rule.Mode = rule.Mode == "Below" and "Below" or "Above"
+	rule.Enabled = rule.Enabled == true
+	return rule
+end
+
+function AutoUI.refreshHeader()
+	local selected = 0
+	for key in pairs(State.AutoCollect.Catalog) do if AutoUI.getRule(key).Enabled then selected += 1 end end
+	AutoUI.EnableButton.Text = "Auto Collect: " .. (State.AutoCollect.Enabled and "ON" or "OFF")
+	AutoUI.EnableButton.BackgroundColor3 = State.AutoCollect.Enabled and COLORS.Green2 or COLORS.Panel2
+	AutoUI.SellButton.Text = "Auto Sell: " .. (State.AutoCollect.AutoSell and "ON" or "OFF")
+	AutoUI.SellButton.BackgroundColor3 = State.AutoCollect.AutoSell and COLORS.Green2 or COLORS.Panel2
+	AutoUI.Summary.Text = string.format("%d produce selected  •  %s harvested", selected, formatNumber(State.AutoCollect.Harvested))
+	AutoUI.Status.Text = State.AutoCollect.LastMessage
+end
+
+rebuildAutoCollectUI = function()
+	if State.Dead or not AutoUI.List then return end
+	clearList(AutoUI.List)
+	local query = normalizeName(AutoUI.Search.Text)
+	local entries = {}
+	for _, entry in pairs(State.AutoCollect.Catalog) do
+		if query == "" or normalizeName(entry.DisplayName):find(query, 1, true) then entries[#entries + 1] = entry end
+	end
+	table.sort(entries, function(a, b) return string.lower(a.DisplayName) < string.lower(b.DisplayName) end)
+	if #entries == 0 then
+		local empty = label(AutoUI.List, State.PlantCatalog.Scanning and "Loading the game's produce catalog..." or "No matching produce", UDim2.new(), UDim2.new(1, -4, 0, 48), 13, COLORS.Muted, Enum.TextXAlignment.Center)
+		empty.LayoutOrder = 1
+		AutoUI.refreshHeader()
+		return
+	end
+	for index, entry in ipairs(entries) do
+		local rule = AutoUI.getRule(entry.Key)
+		local row = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, -7, 0, 54), LayoutOrder = index }, AutoUI.List); corner(row, 8); stroke(row)
+		local selectButton = button(row, rule.Enabled and "✓" or "", UDim2.fromOffset(8, 9), UDim2.fromOffset(36, 36), rule.Enabled and COLORS.Green2 or COLORS.Panel2)
+		local nameLabel = label(row, entry.DisplayName, UDim2.fromOffset(54, 0), UDim2.fromOffset(236, 54), 13, COLORS.Text)
+		nameLabel.Font = Enum.Font.GothamSemibold
+		local thresholdBox = box(row, "0", UDim2.fromOffset(294, 9), UDim2.fromOffset(108, 36)); thresholdBox.Text = tostring(rule.Threshold); thresholdBox.TextXAlignment = Enum.TextXAlignment.Center
+		local metricButton = button(row, rule.Metric == "Height" and "Height (studs)" or "Weight (kg)", UDim2.fromOffset(412, 9), UDim2.fromOffset(142, 36), COLORS.Panel2)
+		local modeButton = button(row, rule.Mode == "Above" and "At / above" or "At / below", UDim2.fromOffset(564, 9), UDim2.fromOffset(136, 36), COLORS.Panel2)
+		local detail = label(row, entry.IsSingleHarvest and "whole plant" or "grown fruit", UDim2.fromOffset(712, 0), UDim2.new(1, -724, 1, 0), 11, COLORS.Muted, Enum.TextXAlignment.Right)
+		track(selectButton.Activated:Connect(function()
+			rule.Enabled = not rule.Enabled
+			selectButton.Text = rule.Enabled and "✓" or ""
+			selectButton.BackgroundColor3 = rule.Enabled and COLORS.Green2 or COLORS.Panel2
+			AutoUI.savePreferences(); AutoUI.refreshHeader()
+		end))
+		track(thresholdBox.FocusLost:Connect(function()
+			local value = tonumber(thresholdBox.Text)
+			if not value or value ~= value then value = rule.Threshold end
+			rule.Threshold = math.max(0, value)
+			thresholdBox.Text = tostring(rule.Threshold)
+			AutoUI.savePreferences()
+		end))
+		track(metricButton.Activated:Connect(function()
+			rule.Metric = rule.Metric == "Height" and "Kilograms" or "Height"
+			metricButton.Text = rule.Metric == "Height" and "Height (studs)" or "Weight (kg)"
+			AutoUI.savePreferences()
+		end))
+		track(modeButton.Activated:Connect(function()
+			rule.Mode = rule.Mode == "Above" and "Below" or "Above"
+			modeButton.Text = rule.Mode == "Above" and "At / above" or "At / below"
+			AutoUI.savePreferences()
+		end))
+	end
+	AutoUI.refreshHeader()
+end
+
+function AutoUI.catalogEntryForPlant(plantName)
+	local normalized = normalizeName(plantName)
+	for _, entry in pairs(State.AutoCollect.Catalog) do
+		if entry.PlantNames[normalized] then return entry end
+	end
+	return State.AutoCollect.Catalog[normalized]
+end
+
+function AutoUI.isGrown(instance)
+	local age = instance:GetAttribute("Age")
+	local maxAge = instance:GetAttribute("MaxAge")
+	return not (typeof(age) == "number" and typeof(maxAge) == "number") or age >= maxAge
+end
+
+function AutoUI.candidateMeasurement(instance, isSingleHarvest, metric)
+	if metric == "Height" then
+		local ok, _, size = pcall(function() return instance:GetBoundingBox() end)
+		if ok and typeof(size) == "Vector3" then return size.Y end
+		return nil
+	end
+	local ok, grams = pcall(function()
+		if isSingleHarvest then return FruitVisualizerController:CalculatePlantWeight(instance) end
+		return FruitVisualizerController:CalculateFruitWeight(instance)
+	end)
+	if ok and type(grams) == "number" then return grams / 1000 end
+	return nil
+end
+
+function AutoUI.passesRule(value, rule)
+	if type(value) ~= "number" then return false end
+	if rule.Mode == "Below" then return value <= rule.Threshold end
+	return value >= rule.Threshold
+end
+
+function AutoUI.requestSell()
+	local auto = State.AutoCollect
+	if State.Dead or not auto.Enabled or not auto.AutoSell or auto.SellInFlight or os.clock() - auto.LastSellClock < 2 then return end
+	auto.SellInFlight = true
+	auto.LastSellClock = os.clock()
+	auto.SellToken += 1
+	local token = auto.SellToken
+	auto.LastMessage = "Auto Sell: waiting for the server..."
+	AutoUI.refreshHeader()
+	task.spawn(function()
+		local ok, response = pcall(function() return Networking.NPCS.SellAll:Fire() end)
+		if State.Dead or token ~= auto.SellToken then return end
+		auto.SellInFlight = false
+		if ok and type(response) == "table" and response.Success then
+			auto.LastMessage = string.format("Auto Sell sold %s fruit", formatNumber(response.SoldCount or 0))
+		elseif ok then
+			auto.LastMessage = "Auto Sell finished; nothing eligible was sold"
+		else
+			auto.LastMessage = "Auto Sell response failed: " .. tostring(response)
+		end
+		if requestInventoryRefresh then requestInventoryRefresh() end
+		AutoUI.refreshHeader()
+	end)
+	task.spawn(function()
+		task.wait(AUTO_SELL_TIMEOUT)
+		if State.Dead or token ~= auto.SellToken or not auto.SellInFlight then return end
+		auto.SellToken += 1
+		auto.SellInFlight = false
+		auto.LastMessage = "Auto Sell timed out safely; collection is still running"
+		if requestInventoryRefresh then requestInventoryRefresh() end
+		AutoUI.refreshHeader()
+	end)
+end
+
+function AutoUI.runPass()
+	local auto = State.AutoCollect
+	if not auto.Enabled then return 0 end
+	local gardens = workspace:FindFirstChild("Gardens")
+	if not gardens then auto.LastMessage = "Waiting for Gardens to load..."; return 0 end
+	local now = os.clock()
+	local candidates = {}
+	local scanned = 0
+	for _, garden in ipairs(gardens:GetChildren()) do
+		local plants = garden:FindFirstChild("Plants")
+		if plants then
+			for _, plant in ipairs(plants:GetChildren()) do
+				scanned += 1
+				if scanned % 200 == 0 then task.wait() end
+				if tonumber(plant:GetAttribute("UserId")) == LocalPlayer.UserId then
+					local plantId = plant:GetAttribute("PlantId")
+					local plantName = plant:GetAttribute("SeedName") or plant:GetAttribute("CorePartName")
+					local entry = type(plantName) == "string" and AutoUI.catalogEntryForPlant(plantName) or nil
+					local rule = entry and AutoUI.getRule(entry.Key) or nil
+					if type(plantId) == "string" and rule and rule.Enabled then
+						if entry.IsSingleHarvest then
+							if AutoUI.isGrown(plant) then candidates[#candidates + 1] = { Instance = plant, PlantId = plantId, FruitId = "", Entry = entry, Rule = rule, Single = true } end
+						else
+							local fruits = plant:FindFirstChild("Fruits")
+							if fruits then
+								for _, fruit in ipairs(fruits:GetChildren()) do
+									scanned += 1
+									if scanned % 200 == 0 then task.wait() end
+									local fruitId = fruit:GetAttribute("FruitId")
+									if type(fruitId) == "string" and AutoUI.isGrown(fruit) then candidates[#candidates + 1] = { Instance = fruit, PlantId = plantId, FruitId = fruitId, Entry = entry, Rule = rule, Single = false } end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	local collected = 0
+	for _, candidate in ipairs(candidates) do
+		if collected >= AUTO_HARVEST_BATCH then break end
+		local cooldownKey = candidate.PlantId .. ":" .. candidate.FruitId
+		local value = AutoUI.candidateMeasurement(candidate.Instance, candidate.Single, candidate.Rule.Metric)
+		if AutoUI.passesRule(value, candidate.Rule) and (auto.Cooldowns[cooldownKey] or 0) <= now then
+			auto.Cooldowns[cooldownKey] = now + AUTO_HARVEST_RETRY_SECONDS
+			local ok = pcall(function() Networking.Garden.CollectFruit:Fire(candidate.PlantId, candidate.FruitId) end)
+			if ok then collected += 1 end
+		end
+	end
+	for key, expires in pairs(auto.Cooldowns) do if expires + 5 < now then auto.Cooldowns[key] = nil end end
+	auto.LastPassCount = #candidates
+	if collected > 0 then
+		auto.Harvested += collected
+		auto.LastMessage = string.format("Collected %d item%s; %d ripe candidate%s scanned", collected, collected == 1 and "" or "s", #candidates, #candidates == 1 and "" or "s")
+	else
+		auto.LastMessage = string.format("Watching your garden • %d ripe candidate%s", #candidates, #candidates == 1 and "" or "s")
+	end
+	AutoUI.refreshHeader()
+	return collected
 end
 
 rebuildInventoryUI = function()
@@ -1214,21 +1493,51 @@ track(MinimizedBubble.Activated:Connect(function() if not bubbleMoved then setMi
 track(UserInputService.InputBegan:Connect(function(input, processed) if not processed and input.KeyCode == Enum.KeyCode.RightShift then ScreenGui.Enabled = not ScreenGui.Enabled end end))
 
 local function showPage(name)
-	local compose = name == "Compose"; Compose.Visible = compose; HistoryPage.Visible = not compose; ComposeTab.BackgroundColor3 = compose and COLORS.Green2 or COLORS.Panel2; HistoryTab.BackgroundColor3 = compose and COLORS.Panel2 or COLORS.Green2; if not compose then rebuildHistoryUI() end
+	local compose = name == "Compose"
+	local history = name == "History"
+	local autoCollect = name == "AutoCollect"
+	Compose.Visible = compose
+	HistoryPage.Visible = history
+	AutoUI.Page.Visible = autoCollect
+	ComposeTab.BackgroundColor3 = compose and COLORS.Green2 or COLORS.Panel2
+	HistoryTab.BackgroundColor3 = history and COLORS.Green2 or COLORS.Panel2
+	AutoUI.Tab.BackgroundColor3 = autoCollect and COLORS.Green2 or COLORS.Panel2
+	if history then rebuildHistoryUI() elseif autoCollect then rebuildAutoCollectUI() end
 end
-track(ComposeTab.Activated:Connect(function() showPage("Compose") end)); track(HistoryTab.Activated:Connect(function() showPage("History") end)); track(ResolveButton.Activated:Connect(resolveRecipient)); track(UsernameBox.FocusLost:Connect(function(enterPressed) if enterPressed then resolveRecipient() end end))
+track(ComposeTab.Activated:Connect(function() showPage("Compose") end)); track(HistoryTab.Activated:Connect(function() showPage("History") end)); track(AutoUI.Tab.Activated:Connect(function() showPage("AutoCollect") end)); track(ResolveButton.Activated:Connect(resolveRecipient)); track(UsernameBox.FocusLost:Connect(function(enterPressed) if enterPressed then resolveRecipient() end end))
 track(UsernameBox:GetPropertyChangedSignal("Text"):Connect(function() resolveToken += 1; resetRecipientUI("No recipient selected", COLORS.Muted) end)); track(InventorySearch:GetPropertyChangedSignal("Text"):Connect(rebuildInventoryUI))
 for name, filterButton in pairs(FilterButtons) do track(filterButton.Activated:Connect(function() State.Filter = name; for otherName, otherButton in pairs(FilterButtons) do otherButton.BackgroundColor3 = otherName == name and COLORS.Green2 or COLORS.Panel2 end; rebuildInventoryUI() end)) end
 track(ClearButton.Activated:Connect(function() if not State.Sending then table.clear(State.Queue); rebuildInventoryUI(); rebuildQueueUI(); setStatus("Queue cleared") end end))
 track(NoteBox:GetPropertyChangedSignal("Text"):Connect(function() local clamped = clampUtf8(NoteBox.Text, NOTE_CODEPOINT_LIMIT); if clamped ~= NoteBox.Text then NoteBox.Text = clamped end; NoteCounter.Text = tostring(utf8.len(NoteBox.Text) or #NoteBox.Text) .. "/100" end))
 track(SendButton.Activated:Connect(beginSend)); track(HistorySearch:GetPropertyChangedSignal("Text"):Connect(rebuildHistoryUI)); track(ClearHistoryButton.Activated:Connect(function() table.clear(History); saveHistory(); rebuildHistoryUI() end))
+track(AutoUI.Search:GetPropertyChangedSignal("Text"):Connect(rebuildAutoCollectUI))
+track(AutoUI.EnableButton.Activated:Connect(function()
+	State.AutoCollect.Enabled = not State.AutoCollect.Enabled
+	State.AutoCollect.LastMessage = State.AutoCollect.Enabled and "Auto Collect enabled" or "Auto Collect paused"
+	AutoUI.savePreferences(); AutoUI.refreshHeader()
+end))
+track(AutoUI.SellButton.Activated:Connect(function()
+	State.AutoCollect.AutoSell = not State.AutoCollect.AutoSell
+	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled for newly collected fruit" or "Auto Sell disabled"
+	AutoUI.savePreferences(); AutoUI.refreshHeader()
+end))
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
 setLoadingProgress(92, "Loading catalog and inventory...")
-requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); updateCatalogInfo()
+requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); rebuildAutoCollectUI(); updateCatalogInfo()
 task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
 task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1) end end)
+task.spawn(function()
+	while not State.Dead do
+		local collected = AutoUI.runPass()
+		if collected > 0 and State.AutoCollect.AutoSell then
+			task.wait(0.9)
+			AutoUI.requestSell()
+		end
+		task.wait(0.35)
+	end
+end)
 local initialInventoryDeadline = os.clock() + 8
 while not State.Dead and not State.InitialInventoryReady and os.clock() < initialInventoryDeadline do task.wait(0.05) end
 if State.Dead then return end

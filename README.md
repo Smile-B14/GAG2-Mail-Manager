@@ -13,8 +13,10 @@ Executor-side Luau mail interface for Grow a Garden 2, grounded in the game's ma
 2. Execute `GAG2_Mail_Manager.luau`.
 3. The script builds its plant/fruit catalog only from `ReplicatedStorage.Assets.Fruits`, `.Plants`, and `.Seeds`, yielding between small batches so startup does not freeze the game.
 4. Resolve a username, select grown fruits, pets, seeds, or gear, optionally enter a note, and send.
-5. Use the minus button to collapse the interface into a draggable **B** bubble; tap the bubble to restore it.
-6. Press Right Shift to hide or show the interface.
+5. In **Auto Collect**, select produce, choose a weight (kg) or height (studs) threshold and whether to collect at/above or at/below it, then enable Auto Collect. Bamboo defaults to height.
+6. Optionally enable Auto Sell to sell newly collected, unfavorited fruit through the game's normal Sell All endpoint.
+7. Use the minus button to collapse the interface into a draggable **SB** bubble; tap the bubble to restore it.
+8. Press Right Shift to hide or show the interface.
 
 Re-executing automatically stops the previous copy and removes orphaned same-name UI left by an interrupted run.
 
@@ -41,6 +43,11 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Smooth milestone-based loading animation with a 0–100% progress line and Smile B credit
 - Smile B branding in the main header and `SB` minimized bubble
 - Default mail note: `Smile B Messenger`
+- Per-produce Auto Collect rules with persisted selection, weight/height metric, threshold, and above/below condition
+- Authoritative own-garden scanning using the game's `UserId`, `PlantId`, `FruitId`, `Age`, and `MaxAge` attributes
+- Exact game weight calculations in kilograms plus rendered-height measurement for Bamboo and other whole plants
+- Rate-limited harvest batches using the game's `Garden.CollectFruit` packet
+- Optional timeout-safe Auto Sell using the game's `NPCS.SellAll` response; server-protected favorited fruit is not sold
 - Item icons and local mail history
 - Live Fruit Price Stock refresh countdown
 
