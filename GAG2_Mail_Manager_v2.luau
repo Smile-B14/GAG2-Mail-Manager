@@ -372,10 +372,10 @@ local SEND_RECONCILE_SECONDS = 2.5
 local HISTORY_LIMIT = 250
 local CATALOG_ASSET_BATCH = 20
 local UI_ROW_BATCH = 12
-local AUTO_HARVEST_BATCH = 8
-local AUTO_HARVEST_RETRY_SECONDS = 1.75
+local AUTO_HARVEST_BATCH = 50
+local AUTO_HARVEST_RETRY_SECONDS = 0.8
 local AUTO_SELL_TIMEOUT = 8
-local AUTO_SELL_INTERVAL = 5
+local AUTO_SELL_INTERVAL = 3
 
 local COLORS = {
 	Back = Color3.fromRGB(15, 18, 24), Panel = Color3.fromRGB(24, 29, 38), Panel2 = Color3.fromRGB(31, 38, 49),
@@ -1545,7 +1545,7 @@ track(AutoUI.EnableButton.Activated:Connect(function()
 end))
 track(AutoUI.SellButton.Activated:Connect(function()
 	State.AutoCollect.AutoSell = not State.AutoCollect.AutoSell
-	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled | checking inventory every 5 seconds" or "Auto Sell disabled"
+	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled | checking inventory every 3 seconds" or "Auto Sell disabled"
 	AutoUI.savePreferences(); AutoUI.refreshHeader()
 end))
 track(AutoUI.MutationButton.Activated:Connect(function()
@@ -1563,9 +1563,9 @@ task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wa
 task.spawn(function()
 	while not State.Dead do
 		local collected = AutoUI.runPass()
-		if collected > 0 and State.AutoCollect.AutoSell then task.wait(0.9) end
+		if collected > 0 and State.AutoCollect.AutoSell then task.wait(0.3) end
 		AutoUI.requestSell()
-		task.wait(0.35)
+		task.wait(0.1)
 	end
 end)
 local initialInventoryDeadline = os.clock() + 8
