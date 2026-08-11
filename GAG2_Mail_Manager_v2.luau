@@ -629,15 +629,29 @@ local function groupFor(category)
 	return "Gears"
 end
 
+-- Exact Tool attributes used by the game's own gifting/drop controllers.
+-- Their values are mailbox item keys and Count is the live stack size.
+local TOOL_CATEGORY_ATTRIBUTES = {
+	SeedTool = "Seeds", Sprinkler = "Sprinklers", WateringCan = "WateringCans",
+	Mushroom = "Mushrooms", Gnome = "Gnomes", Raccoon = "Raccoons", Crate = "Crates",
+	Teleporter = "Teleporters", PlayerMagnet = "Magnets", FruitMagnet = "FruitMagnets",
+	PetTeleporter = "PetTeleporters", SeedPack = "SeedPacks", Wheelbarrow = "Wheelbarrows",
+	Trowel = "Trowels", Crowbar = "Crowbars", Ladder = "Ladders", FreezeRay = "FreezeRays",
+	PowerHose = "PowerHoses", Rake = "Rakes", Sign = "Signs", EmptyPot = "EmptyPots",
+	Flashbang = "Flashbangs", Bird = "Birds",
+}
+
 local function buildInventoryEntries(token)
 	-- Get the current replica every pass. The game may replace the local replica or
 	-- its Data table after startup, so retaining only the first object can go stale.
 	local currentReplica = replicaFromClient(PlayerStateClient)
 	if validInventoryReplica(currentReplica) then Replica = currentReplica end
-	local output = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
+	local output = {}; local outputByKey = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
 	-- Match the official mailbox inventory loop: stackables use replica counts;
 	-- pets and harvested fruit are unique entries with stable mailbox IDs.
-	for _, category in ipairs(mailableCategories()) do
+	local stackCategories = mailableCategories()
+	local stackCategorySet = {}; for _, category in ipairs(stackCategories) do stackCategorySet[category] = true end
+	for _, category in ipairs(stackCategories) do
 		if not inventoryScanActive(token) then return nil end
 		local categoryData = inventory[category]
 		if type(categoryData) == "table" then
@@ -646,13 +660,17 @@ local function buildInventoryEntries(token)
 				local available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
 				if available > 0 then
 					local displayName, icon = resolveItem(category, itemKey, entryValue)
-					output[#output + 1] = { Key = category .. "\31" .. tostring(itemKey), Category = category, Group = groupFor(category), ItemKey = itemKey, EntryValue = entryValue, Available = available, DisplayName = displayName, Icon = icon, LiveValue = 0 }
+					local key = category .. "\31" .. tostring(itemKey)
+					local item = { Key = key, Category = category, Group = groupFor(category), ItemKey = itemKey, EntryValue = entryValue, Available = available, DisplayName = displayName, Icon = icon, LiveValue = 0 }
+					output[#output + 1] = item; outputByKey[key] = item
 				end
 			end
 		end
 		task.wait()
 	end
 	local carriedFruits = {}
+	local carriedPets = {}
+	local liveStacks = {}
 	local hiddenFruitIds = {}
 	local hiddenPetIds = {}
 	local function scanLiveContainer(container)
@@ -661,28 +679,60 @@ local function buildInventoryEntries(token)
 		if not ok or type(children) ~= "table" then return end
 		for _, instance in ipairs(children) do
 			if not inventoryScanActive(token) then return end
-			local inspectOk, fruitData, fruitIcon, petId, favorite = pcall(function()
+			local inspectOk, attributes, isFruit, textureId = pcall(function()
 				local attributes = instance:GetAttributes()
 				local isFruit = FruitProxyUtil.IsFruitInstance(instance)
 				if isFruit then
 					attributes.FruitName = attributes.FruitName or attributes.Fruit
 				end
-				return isFruit and attributes or nil, instance:IsA("Tool") and instance.TextureId or nil,
-					instance:IsA("Tool") and instance:GetAttribute("PetId") or nil, attributes.IsFavorite == true
+				attributes.Name = attributes.Name or attributes.PetName or instance.Name
+				return attributes, isFruit, instance:IsA("Tool") and instance.TextureId or nil
 			end)
-			if inspectOk then
-				if type(fruitData) == "table" and type(fruitData.Id) == "string" and fruitData.Id ~= ""
-					and type(fruitData.FruitName) == "string" and fruitData.FruitName ~= "" then
-					local identity = tostring(fruitData.Id)
-					if favorite then hiddenFruitIds[identity] = true else carriedFruits[#carriedFruits + 1] = { Data = fruitData, Icon = fruitIcon } end
+			if inspectOk and type(attributes) == "table" then
+				local favorite = attributes.IsFavorite == true
+				if isFruit and type(attributes.Id) == "string" and attributes.Id ~= ""
+					and type(attributes.FruitName) == "string" and attributes.FruitName ~= "" then
+					local identity = tostring(attributes.Id)
+					if favorite then hiddenFruitIds[identity] = true else carriedFruits[#carriedFruits + 1] = { Data = attributes, Icon = textureId } end
 				end
+				local petId = attributes.PetId
 				if favorite and petId ~= nil and tostring(petId) ~= "" then hiddenPetIds[tostring(petId)] = true end
+				if not favorite and type(petId) == "string" and petId ~= "" then
+					attributes.Id = attributes.Id or petId
+					carriedPets[#carriedPets + 1] = { Data = attributes, Icon = textureId }
+				end
+				local liveCount = tonumber(attributes.Count)
+				if liveCount and liveCount > 0 then
+					for attributeName, category in pairs(TOOL_CATEGORY_ATTRIBUTES) do
+						local itemKey = attributes[attributeName]
+						if stackCategorySet[category] and (type(itemKey) == "string" or type(itemKey) == "number") and tostring(itemKey) ~= "" then
+							local key = category .. "\31" .. tostring(itemKey)
+							local count = math.max(1, math.floor(liveCount))
+							local previous = liveStacks[key]
+							if not previous or count > previous.Count then liveStacks[key] = { Key = key, Category = category, ItemKey = itemKey, Count = count, Icon = textureId } end
+						end
+					end
+				end
 			end
 		end
 	end
 	scanLiveContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
 	scanLiveContainer(LocalPlayer.Character)
+	for key, live in pairs(liveStacks) do
+		if not inventoryScanActive(token) then return nil end
+		local item = outputByKey[key]
+		if item then
+			item.Available = live.Count; item.EntryValue = live.Count
+			if item.Icon == "" then item.Icon = normalizeImage(live.Icon) end
+		else
+			local displayName, icon = resolveItem(live.Category, live.ItemKey, live.Count)
+			if icon == "" then icon = normalizeImage(live.Icon) end
+			item = { Key = key, Category = live.Category, Group = groupFor(live.Category), ItemKey = live.ItemKey, EntryValue = live.Count, Available = live.Count, DisplayName = displayName, Icon = icon, LiveValue = 0 }
+			output[#output + 1] = item; outputByKey[key] = item
+		end
+	end
 
+	local seenPetIds = {}
 	local pets = inventory.Pets
 	if type(pets) == "table" then
 		for itemKey, entryValue in pairs(pets) do
@@ -690,6 +740,7 @@ local function buildInventoryEntries(token)
 			local petId = type(entryValue) == "table" and entryValue.Id or nil
 			local petHidden = hiddenPetIds[tostring(itemKey)] or (petId ~= nil and hiddenPetIds[tostring(petId)])
 			if type(entryValue) == "table" and petId ~= nil and entryValue.Equipped ~= true and not isFavorited(entryValue) and not petHidden then
+				seenPetIds[tostring(petId)] = true; seenPetIds[tostring(itemKey)] = true
 				local displayName, icon = resolveItem("Pets", itemKey, entryValue)
 				output[#output + 1] = {
 					Key = "Pets\31" .. tostring(itemKey), Category = "Pets", Group = "Pets",
@@ -697,6 +748,16 @@ local function buildInventoryEntries(token)
 					DisplayName = displayName, Icon = icon, LiveValue = 0,
 				}
 			end
+		end
+	end
+	for _, carried in ipairs(carriedPets) do
+		if not inventoryScanActive(token) then return nil end
+		local petId = carried.Data.Id
+		if petId ~= nil and not seenPetIds[tostring(petId)] and not hiddenPetIds[tostring(petId)] then
+			seenPetIds[tostring(petId)] = true
+			local displayName, icon = resolveItem("Pets", petId, carried.Data)
+			if icon == "" then icon = normalizeImage(carried.Icon) end
+			output[#output + 1] = { Key = "Pets\31" .. tostring(petId), Category = "Pets", Group = "Pets", ItemKey = petId, EntryValue = carried.Data, Available = 1, DisplayName = displayName, Icon = icon, LiveValue = 0 }
 		end
 	end
 	local seenFruitIds = {}
@@ -822,7 +883,8 @@ label(InventoryPanel, "Inventory", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0,
 local InventorySearch = box(InventoryPanel, "Search items", UDim2.fromOffset(12, 36), UDim2.new(1, -100, 0, 34))
 local QuantityBox = box(InventoryPanel, "Qty", UDim2.new(1, -80, 0, 36), UDim2.fromOffset(68, 34)); QuantityBox.Text = "1"; QuantityBox.TextXAlignment = Enum.TextXAlignment.Center
 local FilterBar = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 78), Size = UDim2.new(1, -24, 0, 31) }, InventoryPanel)
-local FilterButtons = {}; for index, name in ipairs({ "All", "Fruits", "Pets", "Seeds", "Gears" }) do FilterButtons[name] = button(FilterBar, name, UDim2.fromOffset((index - 1) * 78, 0), UDim2.fromOffset(72, 29), name == "All" and COLORS.Green2 or COLORS.Panel2) end
+local filterNames = { "All", "Fruits", "Pets", "Seeds", "Gears" }
+local FilterButtons = {}; for index, name in ipairs(filterNames) do FilterButtons[name] = button(FilterBar, name, UDim2.new((index - 1) / #filterNames, 0, 0, 0), UDim2.new(1 / #filterNames, -5, 0, 29), name == "All" and COLORS.Green2 or COLORS.Panel2) end
 local InventoryList = scrolling(InventoryPanel, UDim2.fromOffset(10, 116), UDim2.new(1, -20, 1, -126))
 
 local QueuePanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(638, 0), Size = UDim2.new(1, -638, 1, 0) }, Compose); corner(QueuePanel, 10); stroke(QueuePanel)
@@ -830,8 +892,8 @@ local QueueHeader = label(QueuePanel, "Queue: 0", UDim2.fromOffset(12, 7), UDim2
 local ClearButton = button(QueuePanel, "Clear", UDim2.new(1, -78, 0, 7), UDim2.fromOffset(66, 28), COLORS.Panel2)
 local QueueValue = label(QueuePanel, "Selected fruit value: 0 Sheckles", UDim2.fromOffset(12, 35), UDim2.new(1, -24, 0, 23), 13, COLORS.Green)
 local QueueList = scrolling(QueuePanel, UDim2.fromOffset(10, 64), UDim2.new(1, -20, 1, -210))
-local NoteBox = box(QueuePanel, "Optional note", UDim2.new(0, 12, 1, -136), UDim2.new(1, -24, 0, 58)); NoteBox.MultiLine = true; NoteBox.TextWrapped = true; NoteBox.TextYAlignment = Enum.TextYAlignment.Top
-local NoteCounter = label(QueuePanel, "0/100", UDim2.new(1, -90, 1, -77), UDim2.fromOffset(76, 18), 11, COLORS.Muted, Enum.TextXAlignment.Right)
+local NoteBox = box(QueuePanel, "Optional note", UDim2.new(0, 12, 1, -136), UDim2.new(1, -24, 0, 58)); NoteBox.MultiLine = true; NoteBox.TextWrapped = true; NoteBox.TextYAlignment = Enum.TextYAlignment.Top; NoteBox.Text = "Smile B Messenger"
+local NoteCounter = label(QueuePanel, "17/100", UDim2.new(1, -90, 1, -77), UDim2.fromOffset(76, 18), 11, COLORS.Muted, Enum.TextXAlignment.Right)
 local SendButton = button(QueuePanel, "Send queued items", UDim2.new(0, 12, 1, -52), UDim2.new(1, -24, 0, 40), COLORS.Green2)
 local HistorySearch = box(HistoryPage, "Search history", UDim2.fromOffset(0, 0), UDim2.new(1, -126, 0, 38))
 local ClearHistoryButton = button(HistoryPage, "Clear history", UDim2.new(1, -116, 0, 0), UDim2.fromOffset(116, 38), COLORS.Panel2)

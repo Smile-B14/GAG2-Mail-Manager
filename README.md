@@ -24,6 +24,7 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Batched/yielding asset scans to reduce frame stalls
 - Replica-safe startup that reuses the game's already-loaded `PlayerStateClient` before attempting an executor-local module require
 - Live inventory refresh every second, reacquiring the current player replica and recovering automatically if one refresh fails
+- Exact live Tool-marker reconciliation for newly added seed, gear, and pet inventory entries and stack counts
 - Grown-fruit discovery from authoritative `Inventory.HarvestedFruits` entries plus exact game-marked `FruitProxyUtil` instances, using stable mailbox IDs
 - Pets come from authoritative `Inventory.Pets`; equipped and favorited pets are excluded
 - Favorited harvested fruit is excluded and removed from stale queues
@@ -34,10 +35,12 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Inventory reconciliation after a missing/hung response to detect sends that the server accepted even when no response returned
 - STOP immediately cancels the local send state and ignores late responses
 - Search and Fruits / Pets / Seeds / Gears filters
+- Responsive five-tab inventory filter row that stays inside the panel at every UI scale
 - Draggable minimized bubble with swirl animation to and from the bubble's actual position
 - Responsive desktop/mobile scaling
 - Smooth milestone-based loading animation with a 0–100% progress line and Smile B credit
 - Smile B branding in the main header and `SB` minimized bubble
+- Default mail note: `Smile B Messenger`
 - Item icons and local mail history
 - Live Fruit Price Stock refresh countdown
 
