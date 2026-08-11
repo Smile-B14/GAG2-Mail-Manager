@@ -468,6 +468,10 @@ local function groupFor(category)
 end
 
 local function buildInventoryEntries(token)
+	-- Get the current replica every pass. The game may replace the local replica or
+	-- its Data table after startup, so retaining only the first object can go stale.
+	local currentReplica = replicaFromClient(PlayerStateClient)
+	if validInventoryReplica(currentReplica) then Replica = currentReplica end
 	local output = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
 	-- Match the official mailbox inventory loop: stackables use replica counts;
 	-- pets and harvested fruit are unique entries with stable mailbox IDs.
@@ -486,11 +490,44 @@ local function buildInventoryEntries(token)
 		end
 		task.wait()
 	end
+	local carriedFruits = {}
+	local hiddenFruitIds = {}
+	local hiddenPetIds = {}
+	local function scanLiveContainer(container)
+		if not container then return end
+		local ok, children = pcall(container.GetChildren, container)
+		if not ok or type(children) ~= "table" then return end
+		for _, instance in ipairs(children) do
+			if not inventoryScanActive(token) then return end
+			local inspectOk, fruitData, fruitIcon, petId, favorite = pcall(function()
+				local attributes = instance:GetAttributes()
+				local isFruit = FruitProxyUtil.IsFruitInstance(instance)
+				if isFruit then
+					attributes.FruitName = attributes.FruitName or attributes.Fruit
+				end
+				return isFruit and attributes or nil, instance:IsA("Tool") and instance.TextureId or nil,
+					instance:IsA("Tool") and instance:GetAttribute("PetId") or nil, attributes.IsFavorite == true
+			end)
+			if inspectOk then
+				if type(fruitData) == "table" and type(fruitData.Id) == "string" and fruitData.Id ~= ""
+					and type(fruitData.FruitName) == "string" and fruitData.FruitName ~= "" then
+					local identity = tostring(fruitData.Id)
+					if favorite then hiddenFruitIds[identity] = true else carriedFruits[#carriedFruits + 1] = { Data = fruitData, Icon = fruitIcon } end
+				end
+				if favorite and petId ~= nil and tostring(petId) ~= "" then hiddenPetIds[tostring(petId)] = true end
+			end
+		end
+	end
+	scanLiveContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scanLiveContainer(LocalPlayer.Character)
+
 	local pets = inventory.Pets
 	if type(pets) == "table" then
 		for itemKey, entryValue in pairs(pets) do
 			if not inventoryScanActive(token) then return nil end
-			if type(entryValue) == "table" and entryValue.Id ~= nil and entryValue.Equipped ~= true and not isFavorited(entryValue) then
+			local petId = type(entryValue) == "table" and entryValue.Id or nil
+			local petHidden = hiddenPetIds[tostring(itemKey)] or (petId ~= nil and hiddenPetIds[tostring(petId)])
+			if type(entryValue) == "table" and petId ~= nil and entryValue.Equipped ~= true and not isFavorited(entryValue) and not petHidden then
 				local displayName, icon = resolveItem("Pets", itemKey, entryValue)
 				output[#output + 1] = {
 					Key = "Pets\31" .. tostring(itemKey), Category = "Pets", Group = "Pets",
@@ -506,7 +543,7 @@ local function buildInventoryEntries(token)
 		local id = entryValue.Id
 		if id == nil or tostring(id) == "" then return end
 		local identity = tostring(id)
-		if seenFruitIds[identity] then return end
+		if hiddenFruitIds[identity] or seenFruitIds[identity] then return end
 		seenFruitIds[identity] = true
 		local normalized = normalizeFruitEntry(entryValue, tostring(itemKey))
 		local displayName, icon = resolveItem(FRUIT_CATEGORY, itemKey, normalized)
@@ -524,25 +561,12 @@ local function buildInventoryEntries(token)
 			addFruit(itemKey, entryValue)
 		end
 	end
-	-- Some live clients expose carried produce only as the game's own fruit proxy
-	-- instances. This is the same exact marker used by the game's fruit UI; it is
-	-- not a name-based Tool scan.
-	local function scanFruitContainer(container)
-		if not container then return end
-		for _, instance in ipairs(container:GetChildren()) do
-			if not inventoryScanActive(token) then return end
-			local ok, isFruit = pcall(FruitProxyUtil.IsFruitInstance, instance)
-			if ok and isFruit then
-				local attributes = instance:GetAttributes()
-				attributes.FruitName = attributes.FruitName or attributes.Fruit
-				if type(attributes.Id) == "string" and attributes.Id ~= "" and type(attributes.FruitName) == "string" and attributes.FruitName ~= "" then
-					addFruit(attributes.Id, attributes, instance:IsA("Tool") and instance.TextureId or nil)
-				end
-			end
-		end
+	-- Carried produce is captured before replica entries so a current favorite
+	-- attribute can suppress a stale replica copy of the same stable fruit ID.
+	for _, carried in ipairs(carriedFruits) do
+		if not inventoryScanActive(token) then return nil end
+		addFruit(carried.Data.Id, carried.Data, carried.Icon)
 	end
-	scanFruitContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
-	scanFruitContainer(LocalPlayer.Character)
 	table.sort(output, function(a, b)
 		if a.Group ~= b.Group then return a.Group < b.Group end
 		if a.LiveValue ~= b.LiveValue then return a.LiveValue > b.LiveValue end
@@ -736,27 +760,32 @@ requestInventoryRefresh = function()
 	if State.InventoryScanning then return end
 	State.InventoryScanning = true
 	task.spawn(function()
-		while not State.Dead and State.InventoryRefreshRequested do
-			State.InventoryRefreshRequested = false
-			State.InventoryScanToken += 1; local token = State.InventoryScanToken
-			task.wait(0.03)
-			if State.Dead or token ~= State.InventoryScanToken then break end
-			local ok, entries = pcall(buildInventoryEntries, token)
-			if ok and type(entries) == "table" and not State.Dead and token == State.InventoryScanToken then
-				State.InventoryCache = entries
-				local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
-				for key, queued in pairs(State.Queue) do
-					local current = currentByKey[key]
-					if current then
-						queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon; queued.LiveValue = current.LiveValue
-					elseif not State.Sending then
-						State.Queue[key] = nil
+		local workerOk, workerError = pcall(function()
+			while not State.Dead and State.InventoryRefreshRequested do
+				State.InventoryRefreshRequested = false
+				State.InventoryScanToken += 1; local token = State.InventoryScanToken
+				task.wait(0.03)
+				if State.Dead or token ~= State.InventoryScanToken then break end
+				local ok, entries = pcall(buildInventoryEntries, token)
+				if ok and type(entries) == "table" and not State.Dead and token == State.InventoryScanToken then
+					State.InventoryCache = entries
+					local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
+					for key, queued in pairs(State.Queue) do
+						local current = currentByKey[key]
+						if current then
+							queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon; queued.LiveValue = current.LiveValue
+						elseif not State.Sending then
+							State.Queue[key] = nil
+						end
 					end
+					pcall(rebuildInventoryUI); pcall(rebuildQueueUI)
+				elseif not ok then
+					warn("GAG2 Mail Manager: inventory refresh failed: " .. tostring(entries))
 				end
-				rebuildInventoryUI(); rebuildQueueUI()
 			end
-		end
+		end)
 		State.InventoryScanning = false
+		if not workerOk then warn("GAG2 Mail Manager: inventory refresh recovered: " .. tostring(workerError)) end
 		if State.InventoryRefreshRequested and not State.Dead then requestInventoryRefresh() end
 	end)
 end
