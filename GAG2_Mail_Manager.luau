@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local ENV = getgenv and getgenv() or _G
@@ -363,7 +364,13 @@ local function formatNumber(value)
 	end
 	local tier = math.min(math.floor(math.log10(absolute) / 3), #SUFFIXES)
 	local scaled = value / (1000 ^ tier)
-	return string.format(scaled >= 100 and "%.0f%s" or scaled >= 10 and "%.1f%s" or "%.2f%s", scaled, SUFFIXES[tier]):gsub("%.0([A-Z])", "%1")
+	local formatted = string.format(scaled >= 100 and "%.0f%s" or scaled >= 10 and "%.1f%s" or "%.2f%s", scaled, SUFFIXES[tier])
+	local numberPart, suffix = formatted:match("^([%-]?[%d%.]+)(%a+)$")
+	if numberPart and suffix then
+		numberPart = numberPart:gsub("(%..-)0+$", "%1"):gsub("%.$", "")
+		return numberPart .. suffix
+	end
+	return formatted
 end
 
 local function formatMultiplier(value)
@@ -463,16 +470,98 @@ local function getInventory()
 	return Replica and Replica.Data and Replica.Data.Inventory or {}
 end
 
+local function isFruitEntry(value)
+	if type(value) ~= "table" then
+		return false
+	end
+	return value.FruitName ~= nil
+		or value.Name ~= nil
+		or value.Mutation ~= nil
+		or value.Weight ~= nil
+		or value.SizeMultiplier ~= nil
+		or value.DecayAlpha ~= nil
+		or value.Id ~= nil
+		or value.ID ~= nil
+end
+
+local function fruitIdentity(containerKey, entryValue)
+	if type(containerKey) ~= "number" then
+		return containerKey
+	end
+	if type(entryValue) == "table" then
+		return entryValue.Id
+			or entryValue.ID
+			or entryValue.Uuid
+			or entryValue.UUID
+			or entryValue.ItemId
+			or containerKey
+	end
+	return containerKey
+end
+
+local function collectFruitEntries(container, output, seen, depth)
+	if type(container) ~= "table" or depth > 3 then
+		return
+	end
+	for containerKey, entryValue in pairs(container) do
+		if isFruitEntry(entryValue) then
+			local itemKey = fruitIdentity(containerKey, entryValue)
+			local identity = tostring(itemKey)
+			local entryIdentity = tostring(entryValue)
+			if not seen[identity] and not seen[entryIdentity] then
+				seen[identity] = true
+				seen[entryIdentity] = true
+				output[#output + 1] = {
+					ItemKey = itemKey,
+					EntryValue = entryValue,
+				}
+			end
+		elseif type(entryValue) == "table" then
+			-- Supports array/map wrappers such as Items, Entries, Data, or
+			-- Fruits without recursively walking the entire player replica.
+			collectFruitEntries(entryValue, output, seen, depth + 1)
+		end
+	end
+end
+
+local function collectNamedFruitContainers(parent, output, seen)
+	if type(parent) ~= "table" then
+		return
+	end
+	for key, value in pairs(parent) do
+		local name = type(key) == "string" and string.lower(key) or ""
+		if type(value) == "table" and (string.find(name, "fruit", 1, true) or string.find(name, "harvest", 1, true)) then
+			collectFruitEntries(value, output, seen, 1)
+		end
+	end
+end
+
+local function harvestedFruitEntries()
+	local output = {}
+	local seen = {}
+	local data = Replica and Replica.Data
+	if type(data) ~= "table" then
+		return output
+	end
+
+	collectNamedFruitContainers(data, output, seen)
+	collectNamedFruitContainers(data.Inventory, output, seen)
+
+	-- Some builds place player collections one level below Replica.Data.
+	for _, child in pairs(data) do
+		if type(child) == "table" then
+			collectNamedFruitContainers(child, output, seen)
+		end
+	end
+	return output
+end
+
 local function mailableCategories()
-	-- HarvestedFruits is intentionally first and explicit. The native mailbox
-	-- catalog may omit grown fruit even when the packet endpoint accepts it.
-	local categories = { "HarvestedFruits" }
-	local seen = { HarvestedFruits = true }
+	local categories = {}
 	local catalogCategories = MailboxItemCatalog.Categories
 	if type(catalogCategories) == "table" then
 		for _, category in ipairs(catalogCategories) do
-			if type(category) == "string" and not seen[category] then
-				seen[category] = true
+			if type(category) == "string" and category ~= "HarvestedFruits" then
 				categories[#categories + 1] = category
 			end
 		end
@@ -483,25 +572,17 @@ end
 local function inventoryEntries()
 	local output = {}
 	local inventory = getInventory()
+
 	for _, category in ipairs(mailableCategories()) do
 		if category ~= "Pets" then
 			local categoryData = inventory[category]
 			if type(categoryData) == "table" then
 				for itemKey, entryValue in pairs(categoryData) do
-					local available
-					if category == "HarvestedFruits" then
-						-- Harvested fruit is stored as one table per inventory key.
-						-- Do not require a particular ID field; executors/game builds
-						-- can expose the same item identity under different fields.
-						available = type(entryValue) == "table" and 1 or 0
-					else
-						available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
-					end
+					local available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
 					if available > 0 then
 						local displayName, icon = resolveItem(category, itemKey, entryValue)
-						local key = category .. "\31" .. tostring(itemKey)
 						output[#output + 1] = {
-							Key = key,
+							Key = category .. "\31" .. tostring(itemKey),
 							Category = category,
 							Group = groupFor(category),
 							ItemKey = itemKey,
@@ -509,13 +590,31 @@ local function inventoryEntries()
 							Available = available,
 							DisplayName = displayName,
 							Icon = icon,
-							LiveValue = category == "HarvestedFruits" and fruitLiveValue(entryValue, itemKey) or 0,
+							LiveValue = 0,
 						}
 					end
 				end
 			end
 		end
 	end
+
+	for _, fruit in ipairs(harvestedFruitEntries()) do
+		local itemKey = fruit.ItemKey
+		local entryValue = fruit.EntryValue
+		local displayName, icon = resolveItem("HarvestedFruits", itemKey, entryValue)
+		output[#output + 1] = {
+			Key = "HarvestedFruits\31" .. tostring(itemKey),
+			Category = "HarvestedFruits",
+			Group = "Fruits",
+			ItemKey = itemKey,
+			EntryValue = entryValue,
+			Available = 1,
+			DisplayName = displayName,
+			Icon = icon,
+			LiveValue = fruitLiveValue(entryValue, itemKey),
+		}
+	end
+
 	table.sort(output, function(a, b)
 		if a.Group ~= b.Group then
 			return a.Group < b.Group
@@ -607,6 +706,8 @@ corner(Window, 12)
 stroke(Window, COLORS.Line, 1.25)
 
 local Scale = new("UIScale", { Scale = 1 }, Window)
+local responsiveScale = 1
+local transitionInProgress = false
 local function updateScale()
 	local camera = workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
@@ -614,7 +715,10 @@ local function updateScale()
 	-- overflow short phone screens even though the window was "responsive".
 	local widthScale = math.max(0.1, (viewport.X - 16) / 1040)
 	local heightScale = math.max(0.1, (viewport.Y - 16) / 660)
-	Scale.Scale = math.min(1, widthScale, heightScale)
+	responsiveScale = math.min(1, widthScale, heightScale)
+	if not transitionInProgress then
+		Scale.Scale = responsiveScale
+	end
 end
 
 local viewportConnection
@@ -693,12 +797,12 @@ stroke(RecipientPanel)
 label(RecipientPanel, "Recipient", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0, 24), 15, COLORS.Text)
 local UsernameBox = box(RecipientPanel, "Username", UDim2.fromOffset(12, 38), UDim2.new(1, -24, 0, 36))
 local ResolveButton = button(RecipientPanel, "Resolve username", UDim2.fromOffset(12, 82), UDim2.new(1, -24, 0, 34), COLORS.Blue)
-local AVATAR_PLACEHOLDER = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 local Avatar = new("ImageLabel", {
 	BackgroundColor3 = COLORS.Panel2,
 	Position = UDim2.new(0.5, -42, 0, 132),
 	Size = UDim2.fromOffset(84, 84),
-	Image = AVATAR_PLACEHOLDER,
+	Image = "",
+	Visible = false,
 }, RecipientPanel)
 corner(Avatar, 42)
 stroke(Avatar)
@@ -707,7 +811,8 @@ ResolvedName.TextWrapped = true
 
 local function resetRecipientUI(message, color)
 	State.Resolved = nil
-	Avatar.Image = AVATAR_PLACEHOLDER
+	Avatar.Image = ""
+	Avatar.Visible = false
 	ResolveButton.Text = "Resolve username"
 	ResolvedName.Text = message or "No recipient selected"
 	ResolvedName.TextColor3 = color or COLORS.Muted
@@ -753,7 +858,7 @@ corner(QueuePanel, 10)
 stroke(QueuePanel)
 local QueueHeader = label(QueuePanel, "Queue: 0 / 100,000", UDim2.fromOffset(12, 7), UDim2.new(1, -95, 0, 25), 15, COLORS.Text)
 local ClearButton = button(QueuePanel, "Clear", UDim2.new(1, -78, 0, 7), UDim2.fromOffset(66, 28), COLORS.Panel2)
-local QueueValue = label(QueuePanel, "Fruit value: 0 Sheckles", UDim2.fromOffset(12, 35), UDim2.new(1, -24, 0, 23), 13, COLORS.Green)
+local QueueValue = label(QueuePanel, "Selected fruit value: 0 Sheckles", UDim2.fromOffset(12, 35), UDim2.new(1, -24, 0, 23), 13, COLORS.Green)
 local QueueList = scrolling(QueuePanel, UDim2.fromOffset(10, 64), UDim2.new(1, -20, 1, -210))
 local NoteBox = box(QueuePanel, "Optional note (100 characters)", UDim2.new(0, 12, 1, -136), UDim2.new(1, -24, 0, 58))
 NoteBox.MultiLine = true
@@ -921,7 +1026,7 @@ rebuildQueueUI = function()
 	end
 	local count = queueUnits()
 	QueueHeader.Text = string.format("Queue: %s / 100,000", formatNumber(count))
-	QueueValue.Text = string.format("Fruit value: %s Sheckles", formatNumber(queueFruitValue()))
+	QueueValue.Text = string.format("Selected fruit value: %s Sheckles", formatNumber(queueFruitValue()))
 	if #entries == 0 then
 		local empty = label(QueueList, "Queue is empty", UDim2.new(), UDim2.new(1, -4, 0, 50), 13, COLORS.Muted, Enum.TextXAlignment.Center)
 		empty.LayoutOrder = 1
@@ -1140,8 +1245,9 @@ local function resolveRecipient()
 		ResolvedName.TextColor3 = COLORS.Green
 		setStatus("Recipient resolved", COLORS.Green)
 		local imageOk, image = pcall(Players.GetUserThumbnailAsync, Players, userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
-		if imageOk and token == resolveToken and not State.Dead then
+		if imageOk and type(image) == "string" and image ~= "" and token == resolveToken and not State.Dead then
 			Avatar.Image = image
+			Avatar.Visible = true
 		end
 	end)
 	task.spawn(function()
@@ -1379,12 +1485,79 @@ end
 track(CloseButton.Activated:Connect(cleanup))
 local minimized = false
 local activePage = "Compose"
+local WINDOW_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local BUBBLE_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+local function playTween(instance, tweenInfo, goals)
+	local tween = TweenService:Create(instance, tweenInfo, goals)
+	tween:Play()
+	return tween
+end
 
 local function setMinimized(value)
-	minimized = value == true
-	Window.Visible = not minimized
-	MinimizedBubble.Visible = minimized
+	local shouldMinimize = value == true
+	if transitionInProgress or minimized == shouldMinimize then
+		return
+	end
+	transitionInProgress = true
+
+	if shouldMinimize then
+		minimized = true
+		local scaleTween = playTween(Scale, WINDOW_TWEEN, { Scale = math.max(0.04, responsiveScale * 0.08) })
+		playTween(Window, WINDOW_TWEEN, { Rotation = 18 })
+		scaleTween.Completed:Wait()
+		if State.Dead then
+			return
+		end
+		Window.Visible = false
+		Window.Rotation = 0
+		Scale.Scale = responsiveScale
+
+		MinimizedBubble.Size = UDim2.fromOffset(12, 12)
+		MinimizedBubble.Rotation = -180
+		MinimizedBubble.Visible = true
+		local bubbleTween = playTween(MinimizedBubble, BUBBLE_TWEEN, {
+			Size = UDim2.fromOffset(58, 58),
+			Rotation = 0,
+		})
+		bubbleTween.Completed:Wait()
+	else
+		local bubbleTween = playTween(MinimizedBubble, WINDOW_TWEEN, {
+			Size = UDim2.fromOffset(12, 12),
+			Rotation = 180,
+		})
+		bubbleTween.Completed:Wait()
+		if State.Dead then
+			return
+		end
+		MinimizedBubble.Visible = false
+		MinimizedBubble.Size = UDim2.fromOffset(58, 58)
+		MinimizedBubble.Rotation = 0
+
+		Window.Visible = true
+		Window.Rotation = -18
+		Scale.Scale = math.max(0.04, responsiveScale * 0.08)
+		local scaleTween = playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale })
+		playTween(Window, BUBBLE_TWEEN, { Rotation = 0 })
+		scaleTween.Completed:Wait()
+		minimized = false
+	end
+
+	transitionInProgress = false
 end
+
+task.defer(function()
+	if State.Dead then
+		return
+	end
+	transitionInProgress = true
+	Window.Rotation = -12
+	Scale.Scale = math.max(0.04, responsiveScale * 0.18)
+	local scaleTween = playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale })
+	playTween(Window, BUBBLE_TWEEN, { Rotation = 0 })
+	scaleTween.Completed:Wait()
+	transitionInProgress = false
+end)
 
 track(MinimizeButton.Activated:Connect(function()
 	setMinimized(true)
