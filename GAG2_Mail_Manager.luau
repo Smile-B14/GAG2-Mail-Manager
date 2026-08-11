@@ -432,29 +432,68 @@ local function fruitDetails(entryValue, itemKey)
 	)
 end
 
+local function normalizeImage(image)
+	if type(image) == "number" and image > 0 then
+		return "rbxassetid://" .. tostring(math.floor(image))
+	end
+	if type(image) == "string" then
+		if image:match("^%d+$") then
+			return "rbxassetid://" .. image
+		end
+		return image
+	end
+	return ""
+end
+
 local function resolveItem(category, itemKey, entryValue)
+	local fallbackName = tostring(itemKey)
+	local fallbackImage = ""
+	if type(entryValue) == "table" then
+		fallbackName = tostring(entryValue.DisplayName or entryValue.FruitName or entryValue.Name or itemKey)
+		fallbackImage = normalizeImage(entryValue.Icon or entryValue.Image or entryValue.IconId or entryValue.ImageId)
+	end
 	local ok, displayName, image = pcall(MailboxItemCatalog.Resolve, category, itemKey, entryValue)
 	if not ok then
-		return tostring(itemKey), ""
+		return fallbackName, fallbackImage
 	end
-	return tostring(displayName or itemKey), tostring(image or "")
+	return tostring(displayName or fallbackName), normalizeImage(image) ~= "" and normalizeImage(image) or fallbackImage
 end
 
 local function getInventory()
 	return Replica and Replica.Data and Replica.Data.Inventory or {}
 end
 
+local function mailableCategories()
+	-- HarvestedFruits is intentionally first and explicit. The native mailbox
+	-- catalog may omit grown fruit even when the packet endpoint accepts it.
+	local categories = { "HarvestedFruits" }
+	local seen = { HarvestedFruits = true }
+	local catalogCategories = MailboxItemCatalog.Categories
+	if type(catalogCategories) == "table" then
+		for _, category in ipairs(catalogCategories) do
+			if type(category) == "string" and not seen[category] then
+				seen[category] = true
+				categories[#categories + 1] = category
+			end
+		end
+	end
+	return categories
+end
+
 local function inventoryEntries()
 	local output = {}
 	local inventory = getInventory()
-	for _, category in ipairs(MailboxItemCatalog.Categories) do
+	for _, category in ipairs(mailableCategories()) do
 		if category ~= "Pets" then
 			local categoryData = inventory[category]
 			if type(categoryData) == "table" then
 				for itemKey, entryValue in pairs(categoryData) do
 					local available
 					if category == "HarvestedFruits" then
-						available = type(entryValue) == "table" and entryValue.Id ~= nil and 1 or 0
+						-- Harvested fruit is stored as one table per inventory key.
+						-- Do not require a particular ID field; executors/game builds
+						-- can expose the same item identity under different fields.
+						available = type(entryValue) == "table" and 1 or 0
 					else
 						available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
 					end
@@ -571,7 +610,11 @@ local Scale = new("UIScale", { Scale = 1 }, Window)
 local function updateScale()
 	local camera = workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	Scale.Scale = math.min(1, math.max(0.58, math.min((viewport.X - 24) / 1040, (viewport.Y - 24) / 660)))
+	-- Always fit inside the usable viewport. The previous 0.58 floor could
+	-- overflow short phone screens even though the window was "responsive".
+	local widthScale = math.max(0.1, (viewport.X - 16) / 1040)
+	local heightScale = math.max(0.1, (viewport.Y - 16) / 660)
+	Scale.Scale = math.min(1, widthScale, heightScale)
 end
 
 local viewportConnection
@@ -600,6 +643,20 @@ label(Header, "GAG2 Mail Manager", UDim2.fromOffset(16, 0), UDim2.new(0, 300, 1,
 local StockTimer = label(Header, "Fruit stock: loading...", UDim2.new(1, -420, 0, 0), UDim2.fromOffset(320, 48), 13, COLORS.Yellow, Enum.TextXAlignment.Right)
 local MinimizeButton = button(Header, "-", UDim2.new(1, -82, 0, 8), UDim2.fromOffset(32, 32), COLORS.Panel2)
 local CloseButton = button(Header, "X", UDim2.new(1, -42, 0, 8), UDim2.fromOffset(32, 32), COLORS.Red)
+
+local MinimizedBubble = button(ScreenGui, "B", UDim2.new(1, -44, 0.5, 0), UDim2.fromOffset(58, 58), COLORS.Green2)
+MinimizedBubble.Name = "MinimizedBubble"
+MinimizedBubble.AnchorPoint = Vector2.new(0.5, 0.5)
+MinimizedBubble.Visible = false
+MinimizedBubble.ZIndex = 50
+MinimizedBubble.TextSize = 22
+MinimizedBubble.Font = Enum.Font.GothamBold
+corner(MinimizedBubble, 29)
+stroke(MinimizedBubble, COLORS.Green, 2)
+new("UIGradient", {
+	Color = ColorSequence.new(COLORS.Green2, COLORS.Blue),
+	Rotation = 45,
+}, MinimizedBubble)
 
 local Nav = new("Frame", {
 	BackgroundTransparency = 1,
@@ -1322,19 +1379,25 @@ end
 track(CloseButton.Activated:Connect(cleanup))
 local minimized = false
 local activePage = "Compose"
+
+local function setMinimized(value)
+	minimized = value == true
+	Window.Visible = not minimized
+	MinimizedBubble.Visible = minimized
+end
+
 track(MinimizeButton.Activated:Connect(function()
-	minimized = not minimized
-	Compose.Visible = not minimized and activePage == "Compose"
-	HistoryPage.Visible = not minimized and activePage == "History"
-	Nav.Visible = not minimized
-	Status.Visible = not minimized
-	Window.Size = minimized and UDim2.fromOffset(1040, 48) or UDim2.fromOffset(1040, 660)
-	MinimizeButton.Text = minimized and "+" or "-"
+	setMinimized(true)
 end))
 
 local dragging = false
 local dragStart
 local startPosition
+local bubbleDragging = false
+local bubbleMoved = false
+local bubbleDragStart
+local bubbleStartCenter
+
 track(Header.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 		dragging = true
@@ -1342,15 +1405,48 @@ track(Header.InputBegan:Connect(function(input)
 		startPosition = Window.Position
 	end
 end))
+
+track(MinimizedBubble.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		bubbleDragging = true
+		bubbleMoved = false
+		bubbleDragStart = input.Position
+		bubbleStartCenter = Vector2.new(
+			MinimizedBubble.AbsolutePosition.X + MinimizedBubble.AbsoluteSize.X * 0.5,
+			MinimizedBubble.AbsolutePosition.Y + MinimizedBubble.AbsoluteSize.Y * 0.5
+		)
+	end
+end))
+
 track(UserInputService.InputChanged:Connect(function(input)
 	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 		local delta = input.Position - dragStart
 		Window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X / Scale.Scale, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y / Scale.Scale)
+	elseif bubbleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - bubbleDragStart
+		if delta.Magnitude > 6 then
+			bubbleMoved = true
+		end
+		local camera = workspace.CurrentCamera
+		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		local radius = MinimizedBubble.AbsoluteSize.X * 0.5
+		local padding = 8
+		local centerX = math.clamp(bubbleStartCenter.X + delta.X, radius + padding, viewport.X - radius - padding)
+		local centerY = math.clamp(bubbleStartCenter.Y + delta.Y, radius + padding, viewport.Y - radius - padding)
+		MinimizedBubble.Position = UDim2.fromOffset(centerX, centerY)
 	end
 end))
+
 track(UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 		dragging = false
+		bubbleDragging = false
+	end
+end))
+
+track(MinimizedBubble.Activated:Connect(function()
+	if not bubbleMoved then
+		setMinimized(false)
 	end
 end))
 track(UserInputService.InputBegan:Connect(function(input, processed)
