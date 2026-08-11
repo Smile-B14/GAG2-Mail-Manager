@@ -25,7 +25,7 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - 100 UTF-8 characters per note
 - Recipient mailbox capacity defaults to 100 gifts
 
-The interface accepts queues of up to 100,000 units and divides them into valid 20-unit gifts. It stops safely on the first server rejection and leaves the unsent remainder queued.
+The interface accepts queues of up to 100,000 units and divides them into valid 20-unit gifts. It stops safely on the first server rejection and leaves the unsent remainder queued. If a write response fails, delivery is reported as uncertain and the unconfirmed batch remains queued; verify inventory or mail state before retrying.
 
 ## Features
 
@@ -37,7 +37,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with bounded request timeouts, late-response rejection, and automatic retry
 - Automatic queued-fruit value total, refreshed when fruit metadata changes or equal-count inventory swaps occur
-- Searchable session/file-backed send history with malformed-record recovery and a 250-record cap
+- Searchable session/file-backed send history with visible outcome status, malformed-record recovery, and a 250-record cap
 - Partial-send accounting and stop control
 
 The game still validates every request server-side. This script does not bypass mailbox availability, inventory ownership, per-gift limits, or recipient capacity.
