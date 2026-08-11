@@ -14,8 +14,9 @@ The script avoids requiring the game's `SharedModules.Networking` module because
 
 1. Join Grow a Garden 2 and wait for your inventory to load.
 2. Execute `GAG2_Mail_Manager.luau`.
-3. Resolve a username, queue items, optionally enter a note, and send.
-4. Press Right Shift to hide or show the interface.
+3. Resolve a username, queue grown fruits, seeds, or gear, optionally enter a note, and send.
+4. Use the minus button to collapse the interface into a draggable **B** bubble; tap the bubble to restore it.
+5. Press Right Shift to hide or show the interface.
 
 Re-executing automatically stops the previous copy and removes orphaned same-name UI left by a cleared executor state or an interrupted initialization.
 
@@ -30,10 +31,11 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 ## Features
 
 - Race-safe username lookup and avatar preview with stale-state clearing, a bounded timeout, and late-response rejection
-- Mailable fruits, seeds, and all non-pet gear categories
+- Explicit grown-fruit discovery even when the native mailbox catalog omits HarvestedFruits, plus seeds and all non-pet gear categories
 - Search and category filters
-- Responsive desktop/mobile scaling that rebinds when Roblox replaces the active camera
-- Item icons in inventory, queue, and local mail history
+- Viewport-fitting desktop/mobile scaling that rebinds when Roblox replaces the active camera
+- Draggable circular minimized mode for mouse and touch
+- Item icons in inventory, queue, and local mail history, with defensive item-metadata fallback when the native catalog omits a grown fruit
 - Fruit mutation, weight, size multiplier, mutation multiplier, stock multiplier, and live Sheckles value
 - Live Fruit Price Stock refresh countdown with bounded request timeouts, late-response rejection, and automatic retry
 - Automatic queued-fruit value total, refreshed when fruit metadata changes or equal-count inventory swaps occur
