@@ -15,7 +15,7 @@ Executor-side Luau mail interface for Grow a Garden 2, grounded in the game's ma
 4. Resolve a username, select grown fruits, pets, seeds, or gear, optionally enter a note, and send.
 5. In **Auto Collect**, select produce, choose a weight (kg) or height (studs) threshold and whether to collect at/above or at/below it, then enable Auto Collect. Bamboo defaults to height.
 6. Optionally enable Auto Sell to sell newly collected, unfavorited fruit through the game's normal Sell All endpoint.
-7. In **Auto Buy**, select live Seed Shop and Gear Shop items. The first load enables Auto Buy and preselects all Super-rarity shop seeds, every sprinkler, Super Watering Can, Basic Pot, and the game's exact basic can (`Common Watering Can`).
+7. In **Auto Buy**, select live Seed Shop and Gear Shop items. The first load enables Auto Buy and preselects all Super-rarity shop seeds, every sprinkler, Super Watering Can, Basic Pot, Trowel, and the game's exact basic can (`Common Watering Can`).
 8. Use the minus button to collapse the interface into a draggable **SB** bubble; tap the bubble to restore it.
 9. Press Right Shift to hide or show the interface.
 
@@ -51,8 +51,10 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Fast rate-limited harvest batches (up to 50 per pass) using the game's `Garden.CollectFruit` packet
 - Optional timeout-safe Auto Sell checks live inventory every three seconds using the game's `NPCS.SellAll` response; server-protected favorited fruit is not sold
 - Persistent Auto Buy selections for the live Seed Shop and Gear Shop catalogs
-- First-load defaults for all shop-stocked Super seeds, all sprinklers, Super Watering Can, Basic Pot, and Common Watering Can
+- First-load defaults for all shop-stocked Super seeds, all sprinklers, Super Watering Can, Basic Pot, Trowel, and Common Watering Can
 - Stock-aware buying through the exact `PurchaseSeed` and `PurchaseGear` packets, subtracting authoritative per-player `PurchasedThisRestock` counts and checking live Sheckles
+- Live in-game Seed Shop and Gear Shop restock countdowns driven by their `UnixNextRestock` values and the game's synchronized server clock
+- Single-touch-safe minimized bubble dragging and restoration; unrelated touches cannot move the bubble
 - Item icons and local mail history
 - Live Fruit Price Stock refresh countdown
 

@@ -70,6 +70,7 @@ local State = {
 		Enabled = AutoPreferences.AutoBuy.Enabled ~= false,
 		Rules = AutoPreferences.AutoBuy.Rules,
 		DefaultsInitialized = AutoPreferences.AutoBuy.DefaultsInitialized == true,
+		DefaultsVersion = tonumber(AutoPreferences.AutoBuy.DefaultsVersion) or 0,
 		Catalog = { Seeds = {}, Gears = {} },
 		Cooldowns = {},
 		PurchaseRequests = 0,
@@ -358,6 +359,7 @@ local SeedData = require(SharedModules:WaitForChild("SeedData"))
 local FruitIdentity = require(SharedModules:WaitForChild("FruitIdentity"))
 local FruitVisualizerController = require(Controllers:WaitForChild("FruitVisualizerController"))
 State.GearShopData = require(SharedModules:WaitForChild("GearShopData"))
+State.ServerClock = require(ClientModules:WaitForChild("ServerClock"))
 setLoadingProgress(60, "Loading game modules...")
 
 local replicaDeadline = os.clock() + 60
@@ -990,6 +992,7 @@ label(AutoUI.Buy.Header, "Automatic shop buying", UDim2.fromOffset(14, 8), UDim2
 AutoUI.Buy.EnableButton = button(AutoUI.Buy.Header, "Auto Buy: ON", UDim2.fromOffset(14, 36), UDim2.fromOffset(150, 34), COLORS.Green2)
 AutoUI.Buy.Summary = label(AutoUI.Buy.Header, "Preparing defaults...", UDim2.fromOffset(180, 28), UDim2.new(1, -194, 0, 22), 13, COLORS.Green)
 AutoUI.Buy.Status = label(AutoUI.Buy.Header, State.AutoBuy.LastMessage, UDim2.fromOffset(180, 50), UDim2.new(1, -194, 0, 20), 11, COLORS.Muted)
+AutoUI.Buy.RestockTimer = label(AutoUI.Buy.Header, "Restock: loading...", UDim2.new(1, -400, 0, 4), UDim2.fromOffset(386, 22), 11, COLORS.Yellow, Enum.TextXAlignment.Right)
 AutoUI.Buy.Search = box(AutoUI.Buy.Page, "Search seeds and gears", UDim2.fromOffset(0, 88), UDim2.new(1, 0, 0, 36))
 AutoUI.Buy.SeedPanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(0, 134), Size = UDim2.new(0.5, -5, 1, -134) }, AutoUI.Buy.Page); corner(AutoUI.Buy.SeedPanel, 10); stroke(AutoUI.Buy.SeedPanel)
 label(AutoUI.Buy.SeedPanel, "Seeds", UDim2.fromOffset(12, 4), UDim2.new(1, -24, 0, 28), 14, COLORS.Text)
@@ -1263,13 +1266,14 @@ function AutoUI.Buy.save()
 	AutoPreferences.AutoBuy.Enabled = State.AutoBuy.Enabled
 	AutoPreferences.AutoBuy.Rules = State.AutoBuy.Rules
 	AutoPreferences.AutoBuy.DefaultsInitialized = State.AutoBuy.DefaultsInitialized
+	AutoPreferences.AutoBuy.DefaultsVersion = State.AutoBuy.DefaultsVersion
 	ENV[AUTO_CONFIG_KEY] = AutoPreferences
 end
 
 function AutoUI.Buy.isDefault(entry)
 	if entry.Category == "Seeds" then return entry.Rarity == "Super" end
 	local name = string.lower(entry.Name)
-	return name:find("sprinkler", 1, true) ~= nil or name == "super watering can" or name == "basic pot" or name == "common watering can" or name == "basic watering can"
+	return name:find("sprinkler", 1, true) ~= nil or name == "super watering can" or name == "basic pot" or name == "common watering can" or name == "basic watering can" or name == "trowel"
 end
 
 function AutoUI.Buy.buildCatalog()
@@ -1295,9 +1299,11 @@ function AutoUI.Buy.buildCatalog()
 		for _, entry in ipairs(State.AutoBuy.Catalog[category]) do
 			local key = category .. ":" .. entry.Name
 			if State.AutoBuy.Rules[key] == nil then State.AutoBuy.Rules[key] = AutoUI.Buy.isDefault(entry) end
+			if State.AutoBuy.DefaultsVersion < 2 and category == "Gears" and entry.Name == "Trowel" then State.AutoBuy.Rules[key] = true end
 		end
 	end
 	State.AutoBuy.DefaultsInitialized = true
+	State.AutoBuy.DefaultsVersion = 2
 	State.AutoBuy.LastMessage = "Live SeedShop and GearShop stock connected"
 	AutoUI.Buy.save()
 end
@@ -1321,6 +1327,19 @@ function AutoUI.Buy.refreshHeader()
 	AutoUI.Buy.EnableButton.BackgroundColor3 = State.AutoBuy.Enabled and COLORS.Green2 or COLORS.Panel2
 	AutoUI.Buy.Summary.Text = string.format("%d selected | %s purchase requests sent", selected, formatNumber(State.AutoBuy.PurchaseRequests))
 	AutoUI.Buy.Status.Text = State.AutoBuy.LastMessage
+end
+
+function AutoUI.Buy.updateRestockTimer()
+	local stockValues = ReplicatedStorage:FindFirstChild("StockValues")
+	local now = State.ServerClock.Now()
+	local function remaining(shopName)
+		local shop = stockValues and stockValues:FindFirstChild(shopName)
+		local nextRestock = shop and shop:FindFirstChild("UnixNextRestock")
+		local seconds = math.max(0, math.floor((nextRestock and tonumber(nextRestock.Value) or now) - now))
+		if seconds >= 3600 then return string.format("%dh %02dm %02ds", math.floor(seconds / 3600), math.floor(seconds % 3600 / 60), seconds % 60) end
+		return string.format("%dm %02ds", math.floor(seconds / 60), seconds % 60)
+	end
+	AutoUI.Buy.RestockTimer.Text = "Seeds " .. remaining("SeedShop") .. " | Gears " .. remaining("GearShop")
 end
 
 function AutoUI.Buy.rebuild()
@@ -1654,13 +1673,20 @@ end
 track(MinimizeButton.Activated:Connect(function() setMinimized(true) end))
 
 local dragging, bubbleDragging, bubbleMoved = false, false, false; local dragStart, startPosition, bubbleDragStart, bubbleStartCenter
-track(Header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; dragStart = input.Position; startPosition = Window.Position end end))
-track(MinimizedBubble.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then bubbleDragging = true; bubbleMoved = false; bubbleDragStart = input.Position; bubbleStartCenter = Vector2.new(MinimizedBubble.AbsolutePosition.X + MinimizedBubble.AbsoluteSize.X * 0.5, MinimizedBubble.AbsolutePosition.Y + MinimizedBubble.AbsoluteSize.Y * 0.5) end end))
+track(Header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; AutoUI.DragInput = input; dragStart = input.Position; startPosition = Window.Position end end))
+track(MinimizedBubble.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then bubbleDragging = true; bubbleMoved = false; AutoUI.BubbleDragInput = input; bubbleDragStart = input.Position; bubbleStartCenter = Vector2.new(MinimizedBubble.AbsolutePosition.X + MinimizedBubble.AbsoluteSize.X * 0.5, MinimizedBubble.AbsolutePosition.Y + MinimizedBubble.AbsoluteSize.Y * 0.5) end end))
 track(UserInputService.InputChanged:Connect(function(input)
-	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then local delta = input.Position - dragStart; Window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X / Scale.Scale, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y / Scale.Scale)
-	elseif bubbleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then local delta = input.Position - bubbleDragStart; if delta.Magnitude > 6 then bubbleMoved = true end; local camera = workspace.CurrentCamera; local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720); local radius = MinimizedBubble.AbsoluteSize.X * 0.5; MinimizedBubble.Position = UDim2.fromOffset(math.clamp(bubbleStartCenter.X + delta.X, radius + 8, viewport.X - radius - 8), math.clamp(bubbleStartCenter.Y + delta.Y, radius + 8, viewport.Y - radius - 8)) end
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch and input == AutoUI.DragInput) then local delta = input.Position - dragStart; Window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X / Scale.Scale, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y / Scale.Scale)
+	elseif bubbleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch and input == AutoUI.BubbleDragInput) then local delta = input.Position - bubbleDragStart; if delta.Magnitude > (input.UserInputType == Enum.UserInputType.Touch and 14 or 6) then bubbleMoved = true end; local camera = workspace.CurrentCamera; local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720); local radius = MinimizedBubble.AbsoluteSize.X * 0.5; MinimizedBubble.Position = UDim2.fromOffset(math.clamp(bubbleStartCenter.X + delta.X, radius + 8, viewport.X - radius - 8), math.clamp(bubbleStartCenter.Y + delta.Y, radius + 8, viewport.Y - radius - 8)) end
 end))
-track(UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false; bubbleDragging = false end end))
+track(UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch and input == AutoUI.DragInput then dragging = false; AutoUI.DragInput = nil end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch and input == AutoUI.BubbleDragInput then
+		local shouldOpen = input.UserInputType == Enum.UserInputType.Touch and bubbleDragging and not bubbleMoved
+		bubbleDragging = false; AutoUI.BubbleDragInput = nil
+		if shouldOpen then task.defer(function() setMinimized(false) end) end
+	end
+end))
 track(MinimizedBubble.Activated:Connect(function() if not bubbleMoved then setMinimized(false) end end))
 track(UserInputService.InputBegan:Connect(function(input, processed) if not processed and input.KeyCode == Enum.KeyCode.RightShift then ScreenGui.Enabled = not ScreenGui.Enabled end end))
 
@@ -1711,7 +1737,7 @@ track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
 setLoadingProgress(92, "Loading catalog and inventory...")
-requestStockSnapshot(); scanPlantCatalog(); AutoUI.Buy.buildCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); rebuildAutoCollectUI(); AutoUI.Buy.rebuild(); updateCatalogInfo()
+requestStockSnapshot(); scanPlantCatalog(); AutoUI.Buy.buildCatalog(); AutoUI.Buy.updateRestockTimer(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); rebuildAutoCollectUI(); AutoUI.Buy.rebuild(); updateCatalogInfo()
 task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
 task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1) end end)
 task.spawn(function()
@@ -1726,7 +1752,7 @@ task.spawn(function()
 	while not State.Dead do AutoUI.Buy.runPass(); task.wait(0.25) end
 end)
 task.spawn(function()
-	while not State.Dead do if AutoUI.Buy.Page.Visible then AutoUI.Buy.rebuild() end; task.wait(1) end
+	while not State.Dead do AutoUI.Buy.updateRestockTimer(); if AutoUI.Buy.Page.Visible then AutoUI.Buy.rebuild() end; task.wait(1) end
 end)
 local initialInventoryDeadline = os.clock() + 8
 while not State.Dead and not State.InitialInventoryReady and os.clock() < initialInventoryDeadline do task.wait(0.05) end
