@@ -29,7 +29,7 @@ The interface accepts queues of up to 100,000 units and divides them into valid 
 
 ## Features
 
-- Race-safe username lookup and avatar preview that clears stale identity state when input changes
+- Race-safe username lookup and avatar preview with stale-state clearing, a bounded timeout, and late-response rejection
 - Mailable fruits, seeds, and all non-pet gear categories
 - Search and category filters
 - Responsive desktop/mobile scaling that rebinds when Roblox replaces the active camera
