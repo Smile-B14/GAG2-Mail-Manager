@@ -374,6 +374,7 @@ local UI_ROW_BATCH = 12
 local AUTO_HARVEST_BATCH = 8
 local AUTO_HARVEST_RETRY_SECONDS = 1.75
 local AUTO_SELL_TIMEOUT = 8
+local AUTO_SELL_INTERVAL = 5
 
 local COLORS = {
 	Back = Color3.fromRGB(15, 18, 24), Panel = Color3.fromRGB(24, 29, 38), Panel2 = Color3.fromRGB(31, 38, 49),
@@ -1093,8 +1094,14 @@ function AutoUI.candidateMeasurement(instance, isSingleHarvest, metric)
 		if isSingleHarvest then return FruitVisualizerController:CalculatePlantWeight(instance) end
 		return FruitVisualizerController:CalculateFruitWeight(instance)
 	end)
-	if ok and type(grams) == "number" then return grams / 1000 end
+	-- Despite the legacy method name, WeightFormat displays this exact value as kg.
+	if ok and type(grams) == "number" then return grams end
 	return nil
+end
+
+function AutoUI.hasMutation(instance)
+	local mutation = instance and instance:GetAttribute("Mutation")
+	return mutation ~= nil and tostring(mutation) ~= ""
 end
 
 function AutoUI.passesRule(value, rule)
@@ -1105,7 +1112,17 @@ end
 
 function AutoUI.requestSell()
 	local auto = State.AutoCollect
-	if State.Dead or not auto.Enabled or not auto.AutoSell or auto.SellInFlight or os.clock() - auto.LastSellClock < 2 then return end
+	if State.Dead or not auto.AutoSell or auto.SellInFlight or os.clock() - auto.LastSellClock < AUTO_SELL_INTERVAL then return end
+	local hasSellableFruit = false
+	for _, item in ipairs(State.InventoryCache) do
+		if item.Group == "Fruits" and (tonumber(item.Available) or 0) > 0 then hasSellableFruit = true; break end
+	end
+	if not hasSellableFruit then
+		auto.LastSellClock = os.clock()
+		auto.LastMessage = "Auto Sell watching inventory | no unfavorited fruit"
+		AutoUI.refreshHeader()
+		return
+	end
 	auto.SellInFlight = true
 	auto.LastSellClock = os.clock()
 	auto.SellToken += 1
@@ -1145,6 +1162,7 @@ function AutoUI.runPass()
 	local now = os.clock()
 	local candidates = {}
 	local scanned = 0
+	local mutatedSkipped = 0
 	for _, garden in ipairs(gardens:GetChildren()) do
 		local plants = garden:FindFirstChild("Plants")
 		if plants then
@@ -1158,7 +1176,9 @@ function AutoUI.runPass()
 					local rule = entry and AutoUI.getRule(entry.Key) or nil
 					if type(plantId) == "string" and rule and rule.Enabled then
 						if entry.IsSingleHarvest then
-							if AutoUI.isGrown(plant) then candidates[#candidates + 1] = { Instance = plant, PlantId = plantId, FruitId = "", Entry = entry, Rule = rule, Single = true } end
+							if AutoUI.isGrown(plant) then
+								if AutoUI.hasMutation(plant) then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = plant, Plant = plant, PlantId = plantId, FruitId = "", Entry = entry, Rule = rule, Single = true } end
+							end
 						else
 							local fruits = plant:FindFirstChild("Fruits")
 							if fruits then
@@ -1166,7 +1186,9 @@ function AutoUI.runPass()
 									scanned += 1
 									if scanned % 200 == 0 then task.wait() end
 									local fruitId = fruit:GetAttribute("FruitId")
-									if type(fruitId) == "string" and AutoUI.isGrown(fruit) then candidates[#candidates + 1] = { Instance = fruit, PlantId = plantId, FruitId = fruitId, Entry = entry, Rule = rule, Single = false } end
+									if type(fruitId) == "string" and AutoUI.isGrown(fruit) then
+										if AutoUI.hasMutation(fruit) or AutoUI.hasMutation(plant) then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = fruit, Plant = plant, PlantId = plantId, FruitId = fruitId, Entry = entry, Rule = rule, Single = false } end
+									end
 								end
 							end
 						end
@@ -1190,9 +1212,9 @@ function AutoUI.runPass()
 	auto.LastPassCount = #candidates
 	if collected > 0 then
 		auto.Harvested += collected
-		auto.LastMessage = string.format("Collected %d item%s; %d ripe candidate%s scanned", collected, collected == 1 and "" or "s", #candidates, #candidates == 1 and "" or "s")
+		auto.LastMessage = string.format("Collected %d | %d matched | %d mutated skipped", collected, #candidates, mutatedSkipped)
 	else
-		auto.LastMessage = string.format("Watching your garden • %d ripe candidate%s", #candidates, #candidates == 1 and "" or "s")
+		auto.LastMessage = string.format("Watching garden | %d matched | %d mutated skipped", #candidates, mutatedSkipped)
 	end
 	AutoUI.refreshHeader()
 	return collected
@@ -1518,7 +1540,7 @@ track(AutoUI.EnableButton.Activated:Connect(function()
 end))
 track(AutoUI.SellButton.Activated:Connect(function()
 	State.AutoCollect.AutoSell = not State.AutoCollect.AutoSell
-	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled for newly collected fruit" or "Auto Sell disabled"
+	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled | checking inventory every 5 seconds" or "Auto Sell disabled"
 	AutoUI.savePreferences(); AutoUI.refreshHeader()
 end))
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
@@ -1531,10 +1553,8 @@ task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wa
 task.spawn(function()
 	while not State.Dead do
 		local collected = AutoUI.runPass()
-		if collected > 0 and State.AutoCollect.AutoSell then
-			task.wait(0.9)
-			AutoUI.requestSell()
-		end
+		if collected > 0 and State.AutoCollect.AutoSell then task.wait(0.9) end
+		AutoUI.requestSell()
 		task.wait(0.35)
 	end
 end)
