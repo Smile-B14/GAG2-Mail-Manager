@@ -41,8 +41,11 @@ local State = {
 		CycleSeconds = 600,
 		ClockOffset = 0,
 		RequestInFlight = false,
+		RequestToken = 0,
 		NextRequestClock = 0,
 		RetrySeconds = 15,
+		TimeoutSeconds = 12,
+		LastError = nil,
 	},
 }
 ENV[STATE_KEY] = State
@@ -950,6 +953,7 @@ local function applyStockSnapshot(snapshot)
 	if type(snapshot) ~= "table" then
 		return
 	end
+	State.Stock.LastError = nil
 	-- Timing-only snapshots must not erase the last known multipliers.
 	if type(snapshot.entries) == "table" then
 		local entries = {}
@@ -978,25 +982,50 @@ local function requestStockSnapshot()
 		return
 	end
 	State.Stock.RequestInFlight = true
+	State.Stock.RequestToken += 1
+	State.Stock.LastError = nil
 	State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
+	local token = State.Stock.RequestToken
+
 	task.spawn(function()
 		local ok, snapshot = pcall(function()
 			return Networking.FruitStock.Request:Fire()
 		end)
-		if State.Dead then
+		if State.Dead or token ~= State.Stock.RequestToken then
 			return
 		end
 		State.Stock.RequestInFlight = false
 		if ok then
 			applyStockSnapshot(snapshot)
+		else
+			State.Stock.LastError = "request failed"
 		end
+	end)
+
+	-- The request is read-only, so a timed-out generation can be abandoned and
+	-- retried without risking duplicate mail. A late response is ignored.
+	task.spawn(function()
+		task.wait(State.Stock.TimeoutSeconds)
+		if State.Dead or token ~= State.Stock.RequestToken or not State.Stock.RequestInFlight then
+			return
+		end
+		State.Stock.RequestToken += 1
+		State.Stock.RequestInFlight = false
+		State.Stock.LastError = "request timed out"
+		State.Stock.NextRequestClock = os.clock() + State.Stock.RetrySeconds
 	end)
 end
 
 local function updateStockTimer()
 	local nextRefresh = State.Stock.NextRefreshUnix
 	if nextRefresh <= 0 then
-		StockTimer.Text = State.Stock.RequestInFlight and "Fruit Price Stock: refreshing..." or "Fruit stock: unavailable"
+		if State.Stock.RequestInFlight then
+			StockTimer.Text = "Fruit Price Stock: refreshing..."
+		elseif State.Stock.LastError then
+			StockTimer.Text = "Fruit stock: " .. State.Stock.LastError .. "; retrying..."
+		else
+			StockTimer.Text = "Fruit stock: unavailable"
+		end
 		return
 	end
 	local remaining = math.max(0, math.floor(nextRefresh - (os.time() + State.Stock.ClockOffset)))
