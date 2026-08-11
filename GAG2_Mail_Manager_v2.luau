@@ -28,6 +28,8 @@ local HISTORY_FILE = "SmileB_GAG2_MailHistory.json"
 local AUTO_CONFIG_KEY = "SmileB_GAG2AutoCollect"
 local AutoPreferences = type(ENV[AUTO_CONFIG_KEY]) == "table" and ENV[AUTO_CONFIG_KEY] or {}
 AutoPreferences.Rules = type(AutoPreferences.Rules) == "table" and AutoPreferences.Rules or {}
+AutoPreferences.AutoBuy = type(AutoPreferences.AutoBuy) == "table" and AutoPreferences.AutoBuy or { Enabled = true, Rules = {}, DefaultsInitialized = false }
+AutoPreferences.AutoBuy.Rules = type(AutoPreferences.AutoBuy.Rules) == "table" and AutoPreferences.AutoBuy.Rules or {}
 ENV[AUTO_CONFIG_KEY] = AutoPreferences
 
 if ENV[STATE_KEY] and ENV[STATE_KEY].Cleanup then
@@ -63,6 +65,15 @@ local State = {
 		SellToken = 0,
 		LastSellClock = 0,
 		LastMessage = "Choose produce and enable Auto Collect",
+	},
+	AutoBuy = {
+		Enabled = AutoPreferences.AutoBuy.Enabled ~= false,
+		Rules = AutoPreferences.AutoBuy.Rules,
+		DefaultsInitialized = AutoPreferences.AutoBuy.DefaultsInitialized == true,
+		Catalog = { Seeds = {}, Gears = {} },
+		Cooldowns = {},
+		PurchaseRequests = 0,
+		LastMessage = "Loading live shop catalogs...",
 	},
 	PlantCatalog = {
 		Names = {},
@@ -264,7 +275,7 @@ local Packet = require(PacketModule)
 local PacketRemote = PacketModule:WaitForChild("RemoteEvent")
 setLoadingProgress(22, "Loading network packets...")
 
-for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitStockSnapshot", "FruitStockRequest", "CollectFruit", "SellAll" }) do
+for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitStockSnapshot", "FruitStockRequest", "CollectFruit", "SellAll", "PurchaseSeed", "PurchaseGear" }) do
 	local deadline = os.clock() + 30
 	while PacketRemote:GetAttribute(packetName) == nil and os.clock() < deadline do
 		task.wait(0.05)
@@ -287,6 +298,12 @@ local Networking = {
 	},
 	NPCS = {
 		SellAll = Packet("SellAll"):Response(Packet.Any),
+	},
+	SeedShop = {
+		PurchaseSeed = Packet("PurchaseSeed", Packet.String),
+	},
+	GearShop = {
+		PurchaseGear = Packet("PurchaseGear", Packet.String),
 	},
 }
 
@@ -340,6 +357,7 @@ local MailboxFlags = require(SharedModules:WaitForChild("Flags"):WaitForChild("M
 local SeedData = require(SharedModules:WaitForChild("SeedData"))
 local FruitIdentity = require(SharedModules:WaitForChild("FruitIdentity"))
 local FruitVisualizerController = require(Controllers:WaitForChild("FruitVisualizerController"))
+State.GearShopData = require(SharedModules:WaitForChild("GearShopData"))
 setLoadingProgress(60, "Loading game modules...")
 
 local replicaDeadline = os.clock() + 60
@@ -877,6 +895,7 @@ end
 -- UI.
 setLoadingProgress(86, "Building the interface...")
 local AutoUI = {}
+AutoUI.Buy = {}
 for _, root in ipairs({ LocalPlayer:FindFirstChildOfClass("PlayerGui"), GuiParent, CoreGui }) do
 	if typeof(root) == "Instance" then pcall(function() for _, child in ipairs(root:GetChildren()) do if child:IsA("ScreenGui") and child.Name == "SmileB_GAG2MailManager" then child:Destroy() end end end) end
 end
@@ -916,9 +935,11 @@ local Nav = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffs
 local ComposeTab = button(Nav, "Compose", UDim2.fromOffset(0, 0), UDim2.fromOffset(110, 32), COLORS.Green2)
 local HistoryTab = button(Nav, "History", UDim2.fromOffset(118, 0), UDim2.fromOffset(110, 32), COLORS.Panel2)
 AutoUI.Tab = button(Nav, "Auto Collect", UDim2.fromOffset(236, 0), UDim2.fromOffset(126, 32), COLORS.Panel2)
+AutoUI.Buy.Tab = button(Nav, "Auto Buy", UDim2.fromOffset(370, 0), UDim2.fromOffset(110, 32), COLORS.Panel2)
 local Compose = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 94), Size = UDim2.new(1, -24, 1, -122) }, Window)
 local HistoryPage = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
 AutoUI.Page = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
+AutoUI.Buy.Page = new("Frame", { BackgroundTransparency = 1, Position = Compose.Position, Size = Compose.Size, Visible = false }, Window)
 local Status = label(Window, "Starting...", UDim2.new(0, 14, 1, -27), UDim2.new(1, -28, 0, 22), 12, COLORS.Muted)
 local function setStatus(text, color) Status.Text = tostring(text or ""); Status.TextColor3 = color or COLORS.Muted end
 
@@ -963,6 +984,19 @@ label(AutoUI.Header, "Auto Sell uses the game's Sell All endpoint (favorited fru
 AutoUI.Search = box(AutoUI.Page, "Search produce", UDim2.fromOffset(0, 110), UDim2.new(1, 0, 0, 36))
 label(AutoUI.Page, "SELECT     PRODUCE                         THRESHOLD       UNIT                 CONDITION", UDim2.fromOffset(8, 150), UDim2.new(1, -16, 0, 22), 10, COLORS.Muted)
 AutoUI.List = scrolling(AutoUI.Page, UDim2.fromOffset(0, 174), UDim2.new(1, 0, 1, -174))
+
+AutoUI.Buy.Header = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, 0, 0, 78) }, AutoUI.Buy.Page); corner(AutoUI.Buy.Header, 10); stroke(AutoUI.Buy.Header)
+label(AutoUI.Buy.Header, "Automatic shop buying", UDim2.fromOffset(14, 8), UDim2.fromOffset(250, 24), 15, COLORS.Text)
+AutoUI.Buy.EnableButton = button(AutoUI.Buy.Header, "Auto Buy: ON", UDim2.fromOffset(14, 36), UDim2.fromOffset(150, 34), COLORS.Green2)
+AutoUI.Buy.Summary = label(AutoUI.Buy.Header, "Preparing defaults...", UDim2.fromOffset(180, 28), UDim2.new(1, -194, 0, 22), 13, COLORS.Green)
+AutoUI.Buy.Status = label(AutoUI.Buy.Header, State.AutoBuy.LastMessage, UDim2.fromOffset(180, 50), UDim2.new(1, -194, 0, 20), 11, COLORS.Muted)
+AutoUI.Buy.Search = box(AutoUI.Buy.Page, "Search seeds and gears", UDim2.fromOffset(0, 88), UDim2.new(1, 0, 0, 36))
+AutoUI.Buy.SeedPanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(0, 134), Size = UDim2.new(0.5, -5, 1, -134) }, AutoUI.Buy.Page); corner(AutoUI.Buy.SeedPanel, 10); stroke(AutoUI.Buy.SeedPanel)
+label(AutoUI.Buy.SeedPanel, "Seeds", UDim2.fromOffset(12, 4), UDim2.new(1, -24, 0, 28), 14, COLORS.Text)
+AutoUI.Buy.SeedList = scrolling(AutoUI.Buy.SeedPanel, UDim2.fromOffset(8, 34), UDim2.new(1, -16, 1, -42))
+AutoUI.Buy.GearPanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.new(0.5, 5, 0, 134), Size = UDim2.new(0.5, -5, 1, -134) }, AutoUI.Buy.Page); corner(AutoUI.Buy.GearPanel, 10); stroke(AutoUI.Buy.GearPanel)
+label(AutoUI.Buy.GearPanel, "Gears", UDim2.fromOffset(12, 4), UDim2.new(1, -24, 0, 28), 14, COLORS.Text)
+AutoUI.Buy.GearList = scrolling(AutoUI.Buy.GearPanel, UDim2.fromOffset(8, 34), UDim2.new(1, -16, 1, -42))
 
 local inventoryUiToken = 0
 local function requestedQuantity()
@@ -1223,6 +1257,117 @@ function AutoUI.runPass()
 	end
 	AutoUI.refreshHeader()
 	return collected
+end
+
+function AutoUI.Buy.save()
+	AutoPreferences.AutoBuy.Enabled = State.AutoBuy.Enabled
+	AutoPreferences.AutoBuy.Rules = State.AutoBuy.Rules
+	AutoPreferences.AutoBuy.DefaultsInitialized = State.AutoBuy.DefaultsInitialized
+	ENV[AUTO_CONFIG_KEY] = AutoPreferences
+end
+
+function AutoUI.Buy.isDefault(entry)
+	if entry.Category == "Seeds" then return entry.Rarity == "Super" end
+	local name = string.lower(entry.Name)
+	return name:find("sprinkler", 1, true) ~= nil or name == "super watering can" or name == "basic pot" or name == "common watering can" or name == "basic watering can"
+end
+
+function AutoUI.Buy.buildCatalog()
+	table.clear(State.AutoBuy.Catalog.Seeds)
+	table.clear(State.AutoBuy.Catalog.Gears)
+	local stockValues = ReplicatedStorage:FindFirstChild("StockValues")
+	local seedStock = stockValues and stockValues:FindFirstChild("SeedShop")
+	seedStock = seedStock and seedStock:FindFirstChild("Items")
+	local gearStock = stockValues and stockValues:FindFirstChild("GearShop")
+	gearStock = gearStock and gearStock:FindFirstChild("Items")
+	for _, seed in pairs(SeedData) do
+		if type(seed) == "table" and type(seed.SeedName) == "string" and seedStock and seedStock:FindFirstChild(seed.SeedName) then
+			State.AutoBuy.Catalog.Seeds[#State.AutoBuy.Catalog.Seeds + 1] = { Category = "Seeds", Name = seed.SeedName, Cost = tonumber(seed.PurchasePrice) or 0, Rarity = seed.Rarity or "Common", Stock = seedStock:FindFirstChild(seed.SeedName) }
+		end
+	end
+	for _, gear in pairs(State.GearShopData.Data or {}) do
+		if type(gear) == "table" and type(gear.ItemName) == "string" and gearStock and gearStock:FindFirstChild(gear.ItemName) then
+			State.AutoBuy.Catalog.Gears[#State.AutoBuy.Catalog.Gears + 1] = { Category = "Gears", Name = gear.ItemName, Cost = tonumber(gear.Cost) or 0, Rarity = gear.Rarity or "Common", Stock = gearStock:FindFirstChild(gear.ItemName) }
+		end
+	end
+	for _, category in ipairs({ "Seeds", "Gears" }) do
+		table.sort(State.AutoBuy.Catalog[category], function(a, b) return string.lower(a.Name) < string.lower(b.Name) end)
+		for _, entry in ipairs(State.AutoBuy.Catalog[category]) do
+			local key = category .. ":" .. entry.Name
+			if State.AutoBuy.Rules[key] == nil then State.AutoBuy.Rules[key] = AutoUI.Buy.isDefault(entry) end
+		end
+	end
+	State.AutoBuy.DefaultsInitialized = true
+	State.AutoBuy.LastMessage = "Live SeedShop and GearShop stock connected"
+	AutoUI.Buy.save()
+end
+
+function AutoUI.Buy.purchased(category, name)
+	if not validInventoryReplica(Replica) then return 0 end
+	local purchased = Replica.Data.PurchasedThisRestock
+	purchased = type(purchased) == "table" and purchased[category] or nil
+	return type(purchased) == "table" and (tonumber(purchased[name]) or 0) or 0
+end
+
+function AutoUI.Buy.available(entry)
+	local maximum = entry.Stock and tonumber(entry.Stock.Value) or 0
+	return math.max(0, maximum - AutoUI.Buy.purchased(entry.Category, entry.Name))
+end
+
+function AutoUI.Buy.refreshHeader()
+	local selected = 0
+	for key, enabled in pairs(State.AutoBuy.Rules) do if enabled == true and type(key) == "string" then selected += 1 end end
+	AutoUI.Buy.EnableButton.Text = "Auto Buy: " .. (State.AutoBuy.Enabled and "ON" or "OFF")
+	AutoUI.Buy.EnableButton.BackgroundColor3 = State.AutoBuy.Enabled and COLORS.Green2 or COLORS.Panel2
+	AutoUI.Buy.Summary.Text = string.format("%d selected | %s purchase requests sent", selected, formatNumber(State.AutoBuy.PurchaseRequests))
+	AutoUI.Buy.Status.Text = State.AutoBuy.LastMessage
+end
+
+function AutoUI.Buy.rebuild()
+	if State.Dead then return end
+	clearList(AutoUI.Buy.SeedList); clearList(AutoUI.Buy.GearList)
+	local query = normalizeName(AutoUI.Buy.Search.Text)
+	for _, category in ipairs({ "Seeds", "Gears" }) do
+		local target = category == "Seeds" and AutoUI.Buy.SeedList or AutoUI.Buy.GearList
+		local shown = 0
+		for _, entry in ipairs(State.AutoBuy.Catalog[category]) do
+			if query == "" or normalizeName(entry.Name):find(query, 1, true) then
+				shown += 1
+				local key = category .. ":" .. entry.Name
+				local selected = State.AutoBuy.Rules[key] == true
+				local row = new("Frame", { BackgroundColor3 = COLORS.Panel2, Size = UDim2.new(1, -7, 0, 48), LayoutOrder = shown }, target); corner(row, 7)
+				local toggle = button(row, selected and "✓" or "", UDim2.fromOffset(7, 7), UDim2.fromOffset(34, 34), selected and COLORS.Green2 or COLORS.Panel)
+				local itemName = label(row, entry.Name, UDim2.fromOffset(50, 3), UDim2.new(1, -58, 0, 23), 12, COLORS.Text); itemName.Font = Enum.Font.GothamSemibold
+				label(row, string.format("%s | %s | stock %d", entry.Rarity, formatNumber(entry.Cost), AutoUI.Buy.available(entry)), UDim2.fromOffset(50, 24), UDim2.new(1, -58, 0, 20), 10, COLORS.Muted)
+				toggle.Activated:Connect(function()
+					State.AutoBuy.Rules[key] = not (State.AutoBuy.Rules[key] == true)
+					AutoUI.Buy.save(); AutoUI.Buy.rebuild()
+				end)
+			end
+		end
+		if shown == 0 then label(target, "No matching " .. string.lower(category), UDim2.new(), UDim2.new(1, -4, 0, 44), 12, COLORS.Muted, Enum.TextXAlignment.Center) end
+	end
+	AutoUI.Buy.refreshHeader()
+end
+
+function AutoUI.Buy.runPass()
+	if State.Dead or not State.AutoBuy.Enabled or not validInventoryReplica(Replica) then return end
+	local budget = tonumber(Replica.Data.Sheckles) or 0
+	local now = os.clock()
+	local sent = 0
+	for _, category in ipairs({ "Seeds", "Gears" }) do
+		for _, entry in ipairs(State.AutoBuy.Catalog[category]) do
+			local key = category .. ":" .. entry.Name
+			if sent < 12 and State.AutoBuy.Rules[key] == true and AutoUI.Buy.available(entry) > 0 and entry.Cost <= budget and (State.AutoBuy.Cooldowns[key] or 0) <= now then
+				State.AutoBuy.Cooldowns[key] = now + 0.4
+				local ok = pcall(function()
+					if category == "Seeds" then Networking.SeedShop.PurchaseSeed:Fire(entry.Name) else Networking.GearShop.PurchaseGear:Fire(entry.Name) end
+				end)
+				if ok then budget -= entry.Cost; sent += 1; State.AutoBuy.PurchaseRequests += 1; State.AutoBuy.LastMessage = "Buying in-stock selections | last request: " .. entry.Name end
+			end
+		end
+	end
+	if sent > 0 then AutoUI.Buy.refreshHeader() end
 end
 
 rebuildInventoryUI = function()
@@ -1523,15 +1668,18 @@ local function showPage(name)
 	local compose = name == "Compose"
 	local history = name == "History"
 	local autoCollect = name == "AutoCollect"
+	local autoBuy = name == "AutoBuy"
 	Compose.Visible = compose
 	HistoryPage.Visible = history
 	AutoUI.Page.Visible = autoCollect
+	AutoUI.Buy.Page.Visible = autoBuy
 	ComposeTab.BackgroundColor3 = compose and COLORS.Green2 or COLORS.Panel2
 	HistoryTab.BackgroundColor3 = history and COLORS.Green2 or COLORS.Panel2
 	AutoUI.Tab.BackgroundColor3 = autoCollect and COLORS.Green2 or COLORS.Panel2
-	if history then rebuildHistoryUI() elseif autoCollect then rebuildAutoCollectUI() end
+	AutoUI.Buy.Tab.BackgroundColor3 = autoBuy and COLORS.Green2 or COLORS.Panel2
+	if history then rebuildHistoryUI() elseif autoCollect then rebuildAutoCollectUI() elseif autoBuy then AutoUI.Buy.rebuild() end
 end
-track(ComposeTab.Activated:Connect(function() showPage("Compose") end)); track(HistoryTab.Activated:Connect(function() showPage("History") end)); track(AutoUI.Tab.Activated:Connect(function() showPage("AutoCollect") end)); track(ResolveButton.Activated:Connect(resolveRecipient)); track(UsernameBox.FocusLost:Connect(function(enterPressed) if enterPressed then resolveRecipient() end end))
+track(ComposeTab.Activated:Connect(function() showPage("Compose") end)); track(HistoryTab.Activated:Connect(function() showPage("History") end)); track(AutoUI.Tab.Activated:Connect(function() showPage("AutoCollect") end)); track(AutoUI.Buy.Tab.Activated:Connect(function() showPage("AutoBuy") end)); track(ResolveButton.Activated:Connect(resolveRecipient)); track(UsernameBox.FocusLost:Connect(function(enterPressed) if enterPressed then resolveRecipient() end end))
 track(UsernameBox:GetPropertyChangedSignal("Text"):Connect(function() resolveToken += 1; resetRecipientUI("No recipient selected", COLORS.Muted) end)); track(InventorySearch:GetPropertyChangedSignal("Text"):Connect(rebuildInventoryUI))
 for name, filterButton in pairs(FilterButtons) do track(filterButton.Activated:Connect(function() State.Filter = name; for otherName, otherButton in pairs(FilterButtons) do otherButton.BackgroundColor3 = otherName == name and COLORS.Green2 or COLORS.Panel2 end; rebuildInventoryUI() end)) end
 track(ClearButton.Activated:Connect(function() if not State.Sending then table.clear(State.Queue); rebuildInventoryUI(); rebuildQueueUI(); setStatus("Queue cleared") end end))
@@ -1553,11 +1701,17 @@ track(AutoUI.MutationButton.Activated:Connect(function()
 	State.AutoCollect.LastMessage = State.AutoCollect.CollectMutated and "Mutated produce will be collected when it matches the rule" or "Mutated produce will be skipped"
 	AutoUI.savePreferences(); AutoUI.refreshHeader()
 end))
+track(AutoUI.Buy.Search:GetPropertyChangedSignal("Text"):Connect(function() AutoUI.Buy.rebuild() end))
+track(AutoUI.Buy.EnableButton.Activated:Connect(function()
+	State.AutoBuy.Enabled = not State.AutoBuy.Enabled
+	State.AutoBuy.LastMessage = State.AutoBuy.Enabled and "Auto Buy enabled | purchasing selected live stock" or "Auto Buy paused"
+	AutoUI.Buy.save(); AutoUI.Buy.refreshHeader()
+end))
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
 setLoadingProgress(92, "Loading catalog and inventory...")
-requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); rebuildAutoCollectUI(); updateCatalogInfo()
+requestStockSnapshot(); scanPlantCatalog(); AutoUI.Buy.buildCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); rebuildAutoCollectUI(); AutoUI.Buy.rebuild(); updateCatalogInfo()
 task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
 task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1) end end)
 task.spawn(function()
@@ -1567,6 +1721,12 @@ task.spawn(function()
 		AutoUI.requestSell()
 		task.wait(0.1)
 	end
+end)
+task.spawn(function()
+	while not State.Dead do AutoUI.Buy.runPass(); task.wait(0.25) end
+end)
+task.spawn(function()
+	while not State.Dead do if AutoUI.Buy.Page.Visible then AutoUI.Buy.rebuild() end; task.wait(1) end
 end)
 local initialInventoryDeadline = os.clock() + 8
 while not State.Dead and not State.InitialInventoryReady and os.clock() < initialInventoryDeadline do task.wait(0.05) end
