@@ -149,6 +149,7 @@ if not PlayerStateClient then PlayerStateClient = requirePlayerStateClient() end
 
 local MailboxItemCatalog = require(MailboxControllerModule:WaitForChild("MailboxItemCatalog"))
 local FruitValueCalc = require(SharedModules:WaitForChild("FruitValueCalc"))
+local FruitProxyUtil = require(SharedModules:WaitForChild("FruitProxyUtil"))
 local MutationData = require(SharedModules:WaitForChild("MutationData"))
 local WeightFormat = require(SharedModules:WaitForChild("WeightFormat"))
 local MailboxFlags = require(SharedModules:WaitForChild("Flags"):WaitForChild("MailboxFlags"))
@@ -461,15 +462,15 @@ local function mailableCategories()
 end
 local function groupFor(category)
 	if category == FRUIT_CATEGORY then return "Fruits" end
+	if category == "Pets" then return "Pets" end
 	if category == "Seeds" then return "Seeds" end
 	return "Gears"
 end
 
 local function buildInventoryEntries(token)
 	local output = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
-	-- Match the official mailbox inventory loop exactly: stackable categories are
-	-- numeric counts, Pets are not exposed here, and harvested fruit comes only
-	-- from the authoritative Inventory.HarvestedFruits table.
+	-- Match the official mailbox inventory loop: stackables use replica counts;
+	-- pets and harvested fruit are unique entries with stable mailbox IDs.
 	for _, category in ipairs(mailableCategories()) do
 		if not inventoryScanActive(token) then return nil end
 		local categoryData = inventory[category]
@@ -485,21 +486,63 @@ local function buildInventoryEntries(token)
 		end
 		task.wait()
 	end
-	local harvested = inventory[FRUIT_CATEGORY]
-	if type(harvested) == "table" then
-		for itemKey, entryValue in pairs(harvested) do
+	local pets = inventory.Pets
+	if type(pets) == "table" then
+		for itemKey, entryValue in pairs(pets) do
 			if not inventoryScanActive(token) then return nil end
-			if type(entryValue) == "table" and entryValue.Id ~= nil and not isFavorited(entryValue) then
-				local normalized = normalizeFruitEntry(entryValue, tostring(itemKey))
-				local displayName, icon = resolveItem(FRUIT_CATEGORY, itemKey, normalized)
+			if type(entryValue) == "table" and entryValue.Id ~= nil and entryValue.Equipped ~= true and not isFavorited(entryValue) then
+				local displayName, icon = resolveItem("Pets", itemKey, entryValue)
 				output[#output + 1] = {
-					Key = FRUIT_CATEGORY .. "\31" .. tostring(itemKey), Category = FRUIT_CATEGORY, Group = "Fruits",
-					ItemKey = itemKey, EntryValue = normalized, Available = 1,
-					DisplayName = displayName, Icon = icon, LiveValue = fruitLiveValue(normalized, itemKey),
+					Key = "Pets\31" .. tostring(itemKey), Category = "Pets", Group = "Pets",
+					ItemKey = itemKey, EntryValue = entryValue, Available = 1,
+					DisplayName = displayName, Icon = icon, LiveValue = 0,
 				}
 			end
 		end
 	end
+	local seenFruitIds = {}
+	local function addFruit(itemKey, entryValue, iconOverride)
+		if itemKey == nil or type(entryValue) ~= "table" or isFavorited(entryValue) then return end
+		local id = entryValue.Id
+		if id == nil or tostring(id) == "" then return end
+		local identity = tostring(id)
+		if seenFruitIds[identity] then return end
+		seenFruitIds[identity] = true
+		local normalized = normalizeFruitEntry(entryValue, tostring(itemKey))
+		local displayName, icon = resolveItem(FRUIT_CATEGORY, itemKey, normalized)
+		if icon == "" then icon = normalizeImage(iconOverride) end
+		output[#output + 1] = {
+			Key = FRUIT_CATEGORY .. "\31" .. tostring(itemKey), Category = FRUIT_CATEGORY, Group = "Fruits",
+			ItemKey = itemKey, EntryValue = normalized, Available = 1,
+			DisplayName = displayName, Icon = icon, LiveValue = fruitLiveValue(normalized, itemKey),
+		}
+	end
+	local harvested = inventory[FRUIT_CATEGORY]
+	if type(harvested) == "table" then
+		for itemKey, entryValue in pairs(harvested) do
+			if not inventoryScanActive(token) then return nil end
+			addFruit(itemKey, entryValue)
+		end
+	end
+	-- Some live clients expose carried produce only as the game's own fruit proxy
+	-- instances. This is the same exact marker used by the game's fruit UI; it is
+	-- not a name-based Tool scan.
+	local function scanFruitContainer(container)
+		if not container then return end
+		for _, instance in ipairs(container:GetChildren()) do
+			if not inventoryScanActive(token) then return end
+			local ok, isFruit = pcall(FruitProxyUtil.IsFruitInstance, instance)
+			if ok and isFruit then
+				local attributes = instance:GetAttributes()
+				attributes.FruitName = attributes.FruitName or attributes.Fruit
+				if type(attributes.Id) == "string" and attributes.Id ~= "" and type(attributes.FruitName) == "string" and attributes.FruitName ~= "" then
+					addFruit(attributes.Id, attributes, instance:IsA("Tool") and instance.TextureId or nil)
+				end
+			end
+		end
+	end
+	scanFruitContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scanFruitContainer(LocalPlayer.Character)
 	table.sort(output, function(a, b)
 		if a.Group ~= b.Group then return a.Group < b.Group end
 		if a.LiveValue ~= b.LiveValue then return a.LiveValue > b.LiveValue end
@@ -592,7 +635,7 @@ label(InventoryPanel, "Inventory", UDim2.fromOffset(12, 8), UDim2.new(1, -24, 0,
 local InventorySearch = box(InventoryPanel, "Search items", UDim2.fromOffset(12, 36), UDim2.new(1, -100, 0, 34))
 local QuantityBox = box(InventoryPanel, "Qty", UDim2.new(1, -80, 0, 36), UDim2.fromOffset(68, 34)); QuantityBox.Text = "1"; QuantityBox.TextXAlignment = Enum.TextXAlignment.Center
 local FilterBar = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 78), Size = UDim2.new(1, -24, 0, 31) }, InventoryPanel)
-local FilterButtons = {}; for index, name in ipairs({ "All", "Fruits", "Seeds", "Gears" }) do FilterButtons[name] = button(FilterBar, name, UDim2.fromOffset((index - 1) * 86, 0), UDim2.fromOffset(80, 29), name == "All" and COLORS.Green2 or COLORS.Panel2) end
+local FilterButtons = {}; for index, name in ipairs({ "All", "Fruits", "Pets", "Seeds", "Gears" }) do FilterButtons[name] = button(FilterBar, name, UDim2.fromOffset((index - 1) * 78, 0), UDim2.fromOffset(72, 29), name == "All" and COLORS.Green2 or COLORS.Panel2) end
 local InventoryList = scrolling(InventoryPanel, UDim2.fromOffset(10, 116), UDim2.new(1, -20, 1, -126))
 
 local QueuePanel = new("Frame", { BackgroundColor3 = COLORS.Panel, Position = UDim2.fromOffset(638, 0), Size = UDim2.new(1, -638, 1, 0) }, Compose); corner(QueuePanel, 10); stroke(QueuePanel)
@@ -646,7 +689,8 @@ rebuildInventoryUI = function()
 			local nameLabel = label(row, item.DisplayName, UDim2.fromOffset(78, 5), UDim2.new(1, -155, 0, 22), 13, COLORS.Text); nameLabel.Font = Enum.Font.GothamSemibold
 			local detail = item.Category == FRUIT_CATEGORY and (fruitDetails(item.EntryValue, item.ItemKey) .. "\n" .. formatNumber(item.LiveValue) .. " each | " .. formatNumber(remaining) .. " available") or (item.Category .. " | available " .. formatNumber(remaining))
 			local detailLabel = label(row, detail, UDim2.fromOffset(78, 27), UDim2.new(1, -155, 0, 49), 10, item.Category == FRUIT_CATEGORY and COLORS.Green or COLORS.Muted); detailLabel.TextWrapped = true; detailLabel.TextYAlignment = Enum.TextYAlignment.Top
-			local add = button(row, item.Category == FRUIT_CATEGORY and "+ Fruit" or "+ Qty", UDim2.new(1, -70, 0.5, -16), UDim2.fromOffset(62, 32), COLORS.Green2); add.Activated:Connect(function() queueAdd(item) end)
+			local addText = item.Category == FRUIT_CATEGORY and "+ Fruit" or item.Category == "Pets" and "+ Pet" or "+ Qty"
+			local add = button(row, addText, UDim2.new(1, -70, 0.5, -16), UDim2.fromOffset(62, 32), COLORS.Green2); add.Activated:Connect(function() queueAdd(item) end)
 			if index % UI_ROW_BATCH == 0 then task.wait() end
 		end
 	end)
@@ -717,7 +761,8 @@ requestInventoryRefresh = function()
 	end)
 end
 
--- Stock snapshots also contribute names to the runtime catalog.
+-- Stock snapshots provide live fruit multipliers; inventory still comes only
+-- from the replica and exact game-marked fruit instances.
 local function applyStockSnapshot(snapshot)
 	if type(snapshot) ~= "table" then return end
 	State.Stock.LastError = nil
@@ -891,12 +936,12 @@ local function setMinimized(value)
 	local shouldMinimize = value == true; if transitionInProgress or minimized == shouldMinimize then return end; transitionInProgress = true
 	if shouldMinimize then
 		minimized = true; windowRestorePosition = Window.Position; local target = MinimizedBubble.Position
-		playTween(Scale, WINDOW_TWEEN, { Scale = math.max(0.035, responsiveScale * 0.055) }); local move = playTween(Window, WINDOW_TWEEN, { Position = target, Rotation = 540 }); move.Completed:Wait()
+		playTween(Scale, WINDOW_TWEEN, { Scale = math.max(0.035, responsiveScale * 0.055) }); local move = playTween(Window, WINDOW_TWEEN, { Position = target, Rotation = 90 }); move.Completed:Wait()
 		if State.Dead then return end
-		Window.Visible = false; Window.Rotation = 0; Window.Position = windowRestorePosition; Scale.Scale = responsiveScale; MinimizedBubble.Size = UDim2.fromOffset(10, 10); MinimizedBubble.Rotation = -180; MinimizedBubble.Visible = true; playTween(MinimizedBubble, BUBBLE_TWEEN, { Size = UDim2.fromOffset(58, 58), Rotation = 0 }).Completed:Wait()
+		Window.Visible = false; Window.Rotation = 0; Window.Position = windowRestorePosition; Scale.Scale = responsiveScale; MinimizedBubble.Size = UDim2.fromOffset(10, 10); MinimizedBubble.Rotation = -45; MinimizedBubble.Visible = true; playTween(MinimizedBubble, BUBBLE_TWEEN, { Size = UDim2.fromOffset(58, 58), Rotation = 0 }).Completed:Wait()
 	else
-		local origin = MinimizedBubble.Position; playTween(MinimizedBubble, WINDOW_TWEEN, { Size = UDim2.fromOffset(10, 10), Rotation = 180 }).Completed:Wait(); if State.Dead then return end
-		MinimizedBubble.Visible = false; MinimizedBubble.Size = UDim2.fromOffset(58, 58); MinimizedBubble.Rotation = 0; Window.Position = origin; Window.Visible = true; Window.Rotation = -540; Scale.Scale = math.max(0.035, responsiveScale * 0.055); playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale }); playTween(Window, WINDOW_TWEEN, { Position = windowRestorePosition, Rotation = 0 }).Completed:Wait(); minimized = false
+		local origin = MinimizedBubble.Position; playTween(MinimizedBubble, WINDOW_TWEEN, { Size = UDim2.fromOffset(10, 10), Rotation = 45 }).Completed:Wait(); if State.Dead then return end
+		MinimizedBubble.Visible = false; MinimizedBubble.Size = UDim2.fromOffset(58, 58); MinimizedBubble.Rotation = 0; Window.Position = origin; Window.Visible = true; Window.Rotation = -90; Scale.Scale = math.max(0.035, responsiveScale * 0.055); playTween(Scale, BUBBLE_TWEEN, { Scale = responsiveScale }); playTween(Window, WINDOW_TWEEN, { Position = windowRestorePosition, Rotation = 0 }).Completed:Wait(); minimized = false
 	end
 	transitionInProgress = false
 end
