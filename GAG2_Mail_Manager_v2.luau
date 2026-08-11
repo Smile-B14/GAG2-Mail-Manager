@@ -468,6 +468,16 @@ local WEIGHT_FIELDS = { "Weight", "weight", "WeightGrams", "weightGrams", "Grams
 local SIZE_FIELDS = { "SizeMultiplier", "sizeMultiplier", "Size", "size" }
 local DECAY_FIELDS = { "DecayAlpha", "decayAlpha", "Decay", "decay" }
 local COUNT_FIELDS = { "Count", "count", "Amount", "amount", "Quantity", "quantity", "Stack", "stack" }
+local FAVORITE_FIELDS = { "IsFavorite", "isFavorite", "Favorite", "favorite", "Favorited", "favorited", "IsFavorited", "isFavorited" }
+
+local function isFavorited(value)
+	if type(value) ~= "table" then return false end
+	for _, field in ipairs(FAVORITE_FIELDS) do
+		local favorite = value[field]
+		if favorite == true or favorite == 1 or favorite == "true" then return true end
+	end
+	return false
+end
 
 local function fuzzyId(value)
 	local direct = firstField(value, ID_FIELDS)
@@ -608,7 +618,7 @@ local function fruitAvailable(entryValue)
 	return 1
 end
 local function addFruitCandidate(output, seen, containerKey, entryValue, source, iconOverride, forcedName)
-	if type(entryValue) ~= "table" then return end
+	if type(entryValue) ~= "table" or isFavorited(entryValue) then return end
 	local id = fuzzyId(entryValue)
 	local itemKey = containerKey
 	if itemKey == nil or type(itemKey) == "number" then itemKey = id or itemKey end
@@ -676,6 +686,21 @@ local function collectToolFruits(output, seen, token)
 	inspect(LocalPlayer:FindFirstChildOfClass("Backpack")); inspect(LocalPlayer.Character)
 end
 
+local function favoritedToolIds()
+	local ids = {}
+	local function inspect(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("IsFavorite") == true then
+				local id = child:GetAttribute("Id") or child:GetAttribute("PetId") or child:GetAttribute("InventoryId") or child:GetAttribute("UniqueId")
+				if id ~= nil and tostring(id) ~= "" then ids[tostring(id)] = true end
+			end
+		end
+	end
+	inspect(LocalPlayer:FindFirstChildOfClass("Backpack")); inspect(LocalPlayer.Character)
+	return ids
+end
+
 local function mailableCategories()
 	local categories = {}
 	if type(MailboxItemCatalog.Categories) == "table" then
@@ -700,7 +725,7 @@ local function buildInventoryEntries(token)
 			for itemKey, entryValue in pairs(categoryData) do
 				if not inventoryScanActive(token) then return nil end
 				local available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
-				if available > 0 then
+				if available > 0 and not isFavorited(entryValue) then
 					local displayName, icon = resolveItem(category, itemKey, entryValue)
 					if category == "Seeds" then addPlantName(stripSeedSuffix(displayName)) end
 					output[#output + 1] = { Key = category .. "\31" .. tostring(itemKey), Category = category, Group = groupFor(category), ItemKey = itemKey, EntryValue = entryValue, Available = available, DisplayName = displayName, Icon = icon, LiveValue = 0 }
@@ -709,12 +734,17 @@ local function buildInventoryEntries(token)
 		end
 		task.wait()
 	end
-	local fruits = {}; local seen = {}; local counter = { n = 0 }
+	local fruits = {}; local seen = favoritedToolIds(); local counter = { n = 0 }
 	local harvested = inventory[FRUIT_CATEGORY]
 	if type(harvested) == "table" then
 		for itemKey, entryValue in pairs(harvested) do
 			if not inventoryScanActive(token) then return nil end
-			addFruitCandidate(fruits, seen, itemKey, entryValue, "Inventory/" .. FRUIT_CATEGORY)
+			if isFavorited(entryValue) then
+				local favoriteId = fuzzyId(entryValue) or itemKey
+				if favoriteId ~= nil then seen[tostring(favoriteId)] = true end
+			else
+				addFruitCandidate(fruits, seen, itemKey, entryValue, "Inventory/" .. FRUIT_CATEGORY)
+			end
 		end
 	end
 	if type(inventory) == "table" then
@@ -747,7 +777,7 @@ local function queueUnits()
 end
 local function queueFruitValue()
 	local value = 0
-	for _, entry in pairs(State.Queue) do if entry.Category == FRUIT_CATEGORY then value += fruitLiveValue(entry.EntryValue, entry.ItemKey) * entry.Selected end end
+	for _, entry in pairs(State.Queue) do if entry.Category == FRUIT_CATEGORY then value += (tonumber(entry.LiveValue) or fruitLiveValue(entry.EntryValue, entry.ItemKey)) * entry.Selected end end
 	return value
 end
 
@@ -852,7 +882,7 @@ local function queueAdd(item)
 	local current = State.Queue[item.Key]; local already = current and current.Selected or 0
 	local amount = math.min(requestedQuantity(), math.max(0, item.Available - already))
 	if amount <= 0 then setStatus("That item is already fully queued", COLORS.Yellow); return end
-	if not current then current = { Key = item.Key, Category = item.Category, ItemKey = item.ItemKey, EntryValue = item.EntryValue, DisplayName = item.DisplayName, Icon = item.Icon, Selected = 0 }; State.Queue[item.Key] = current end
+	if not current then current = { Key = item.Key, Category = item.Category, ItemKey = item.ItemKey, EntryValue = item.EntryValue, DisplayName = item.DisplayName, Icon = item.Icon, LiveValue = item.LiveValue, Selected = 0 }; State.Queue[item.Key] = current end
 	current.Selected += amount; setStatus(string.format("Queued %s x%s", item.DisplayName, formatNumber(amount)), COLORS.Green); rebuildInventoryUI(); rebuildQueueUI()
 end
 local function queueRemove(key, amount)
@@ -894,7 +924,7 @@ rebuildQueueUI = function()
 		local icon = new("ImageLabel", { BackgroundColor3 = COLORS.Back, Position = UDim2.fromOffset(6, 7), Size = UDim2.fromOffset(53, 53), Image = entry.Icon }, row); corner(icon, 7)
 		local nameLabel = label(row, entry.DisplayName, UDim2.fromOffset(68, 5), UDim2.new(1, -142, 0, 22), 12, COLORS.Text); nameLabel.Font = Enum.Font.GothamSemibold
 		local detail = "x" .. formatNumber(entry.Selected)
-		if entry.Category == FRUIT_CATEGORY then local each = fruitLiveValue(entry.EntryValue, entry.ItemKey); detail ..= " | each " .. formatNumber(each) .. " | selected " .. formatNumber(each * entry.Selected) end
+		if entry.Category == FRUIT_CATEGORY then local each = tonumber(entry.LiveValue) or fruitLiveValue(entry.EntryValue, entry.ItemKey); detail ..= " | each " .. formatNumber(each) .. " | selected " .. formatNumber(each * entry.Selected) end
 		label(row, detail, UDim2.fromOffset(68, 29), UDim2.new(1, -142, 0, 31), 10, entry.Category == FRUIT_CATEGORY and COLORS.Green or COLORS.Muted)
 		local remove = button(row, "-", UDim2.new(1, -66, 0, 8), UDim2.fromOffset(27, 27), COLORS.Panel); local removeAll = button(row, "X", UDim2.new(1, -34, 0, 8), UDim2.fromOffset(27, 27), COLORS.Red)
 		remove.Activated:Connect(function() queueRemove(entry.Key, 1) end); removeAll.Activated:Connect(function() queueRemove(entry.Key, entry.Selected) end)
@@ -935,7 +965,14 @@ requestInventoryRefresh = function()
 			if ok and type(entries) == "table" and not State.Dead and token == State.InventoryScanToken then
 				State.InventoryCache = entries
 				local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
-				for key, queued in pairs(State.Queue) do local current = currentByKey[key]; if current then queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon end end
+				for key, queued in pairs(State.Queue) do
+					local current = currentByKey[key]
+					if current then
+						queued.EntryValue = current.EntryValue; queued.DisplayName = current.DisplayName; queued.Icon = current.Icon; queued.LiveValue = current.LiveValue
+					elseif not State.Sending then
+						State.Queue[key] = nil
+					end
+				end
 				rebuildInventoryUI(); rebuildQueueUI()
 			end
 		end
@@ -999,7 +1036,11 @@ end
 local function queuePayloadAndPortions()
 	local payload = {}; local portions = {}
 	for key, entry in pairs(State.Queue) do
-		if entry.Selected > 0 then payload[#payload + 1] = { Category = entry.Category, ItemKey = entry.ItemKey, Count = entry.Selected }; portions[#portions + 1] = { Key = key, Entry = entry, Count = entry.Selected } end
+		if entry.Selected > 0 then
+			local unitValue = entry.Category == FRUIT_CATEGORY and (tonumber(entry.LiveValue) or fruitLiveValue(entry.EntryValue, entry.ItemKey)) or 0
+			payload[#payload + 1] = { Category = entry.Category, ItemKey = entry.ItemKey, Count = entry.Selected }
+			portions[#portions + 1] = { Key = key, Entry = entry, Count = entry.Selected, UnitValue = unitValue }
+		end
 	end
 	return payload, portions
 end
@@ -1036,15 +1077,20 @@ local function reconcileDelivered(portions, before, token)
 	return false
 end
 local function resetSendUi()
-	State.Sending = false; SendButton.Text = "Send queued items"; SendButton.BackgroundColor3 = COLORS.Green2; ClearButton.Active = true
+	State.Sending = false
+	pcall(function() SendButton.Text = "Send queued items"; SendButton.BackgroundColor3 = COLORS.Green2; ClearButton.Active = true end)
 end
 local function recordSent(recipient, note, portions, status)
 	local items = {}; local units = 0; local totalValue = 0
 	for _, portion in ipairs(portions) do
-		local entry, count = portion.Entry, portion.Count; units += count; local value = entry.Category == FRUIT_CATEGORY and fruitLiveValue(entry.EntryValue, entry.ItemKey) * count or 0; totalValue += value
+		local entry, count = portion.Entry, portion.Count; units += count; local value = (tonumber(portion.UnitValue) or 0) * count; totalValue += value
 		items[#items + 1] = { Name = entry.DisplayName, Category = entry.Category, Icon = entry.Icon, Count = count, Value = value }
 	end
-	table.insert(History, 1, { Time = os.time(), RecipientName = recipient.DisplayName, Username = recipient.Username, UserId = recipient.UserId, Note = note, Items = items, Units = units, Batches = 1, TotalValue = totalValue, Status = status }); saveHistory(); rebuildHistoryUI()
+	table.insert(History, 1, { Time = os.time(), RecipientName = recipient.DisplayName, Username = recipient.Username, UserId = recipient.UserId, Note = note, Items = items, Units = units, Batches = 1, TotalValue = totalValue, Status = status }); saveHistory()
+end
+local function recordSentSafely(recipient, note, portions, status)
+	local ok, message = pcall(recordSent, recipient, note, portions, status)
+	if not ok then warn("GAG2 Mail Manager: delivery succeeded, but local history could not be saved: " .. tostring(message)) end
 end
 local function consumeQueue(portions)
 	for _, portion in ipairs(portions) do
@@ -1067,20 +1113,21 @@ local function beginSend()
 	State.Sending = true; State.SendToken += 1; local token = State.SendToken; SendButton.Text = "STOP"; SendButton.BackgroundColor3 = COLORS.Red; ClearButton.Active = false
 	setStatus(string.format("Sending %s queued items in one request...", formatNumber(queueUnits())), COLORS.Yellow)
 	task.spawn(function()
+		local deliveryConfirmed = false
 		local safeOk, safeError = pcall(function()
 			local kind, success, message = responseWithTimeout(recipient.UserId, payload, note, token)
 			if kind == "cancelled" or kind == "dead" then return end
 			if not sendActive(token) then return end
 			if kind == "response" and success then
 				if not sendActive(token) then return end
-				consumeQueue(portions); recordSent(recipient, note, portions, "Completed"); setStatus("Sent successfully", COLORS.Green); requestInventoryRefresh(); return
+				deliveryConfirmed = true; consumeQueue(portions); recordSentSafely(recipient, note, portions, "Completed"); setStatus("Sent successfully", COLORS.Green); requestInventoryRefresh(); return
 			end
 			if kind == "timeout" or kind == "error" then
 				setStatus("Server response did not finish; checking inventory...", COLORS.Yellow)
 				local delivered = reconcileDelivered(portions, before, token)
 				if delivered == nil or not sendActive(token) then return end
 				if delivered then
-					consumeQueue(portions); recordSent(recipient, note, portions, "Completed (reconciled)"); setStatus("Sent successfully. Inventory confirmed the delivery.", COLORS.Green)
+					deliveryConfirmed = true; consumeQueue(portions); recordSentSafely(recipient, note, portions, "Completed (reconciled)"); setStatus("Sent successfully. Inventory confirmed the delivery.", COLORS.Green)
 				else
 					setStatus("Request finished without a usable response. Queue kept so you can verify before retrying.", COLORS.Red)
 				end
@@ -1089,8 +1136,14 @@ local function beginSend()
 			setStatus(type(message) == "string" and message ~= "" and message or "Server rejected the request", COLORS.Red)
 		end)
 		if State.Dead or token ~= State.SendToken then return end
-		resetSendUi(); rebuildInventoryUI(); rebuildQueueUI()
-		if not safeOk then setStatus("Send UI recovered after an internal error: " .. tostring(safeError), COLORS.Red) end
+		resetSendUi(); pcall(rebuildInventoryUI); pcall(rebuildQueueUI)
+		if not safeOk then
+			if deliveryConfirmed then
+				pcall(setStatus, "Sent successfully", COLORS.Green)
+			else
+				pcall(setStatus, "Send UI recovered after an internal error: " .. tostring(safeError), COLORS.Red)
+			end
+		end
 	end)
 end
 
@@ -1137,6 +1190,6 @@ track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
 requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); updateCatalogInfo()
-task.spawn(function() while not State.Dead do updateStockTimer(); if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
+task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
 task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1.35) end end)
 setStatus("Ready. Building the live plant catalog in the background...", COLORS.Green)

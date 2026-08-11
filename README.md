@@ -27,12 +27,14 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Replica-safe startup that reuses the game's already-loaded `PlayerStateClient` before attempting an executor-local module require
 - Live inventory refresh for grown fruits, seeds, and gear
 - Grown-fruit discovery from the authoritative `Inventory.HarvestedFruits` table, with deep inventory and Backpack/Character tool fallbacks using stable inventory IDs
+- Favorited fruit/pet IDs and any inventory entries marked `IsFavorite` are excluded from inventory and removed from stale queues
 - Fruit mutation, weight, size multiplier, mutation multiplier, Fruit Price Stock multiplier, and live Sheckles value
 - Automatic selected-fruit total using K/M/B/T/Qa/Qi-style abbreviations
 - Large queued sends have no fixed client-side queue cap and are submitted in one mailbox request rather than the old artificial 20-unit client batching
 - Non-blocking mailbox response timeout so the UI cannot remain stuck on STOP forever
 - Inventory reconciliation after a missing/hung response to detect sends that the server accepted even when no response returned
 - STOP immediately cancels the local send state and ignores late responses
+- Solara-safe post-send handling keeps confirmed delivery separate from optional history rendering and UI refresh work
 - Search and Fruits / Seeds / Gears filters
 - Draggable minimized bubble with swirl animation to and from the bubble's actual position
 - Responsive desktop/mobile scaling
