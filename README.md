@@ -36,6 +36,8 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Search and Fruits / Pets / Seeds / Gears filters
 - Draggable minimized bubble with swirl animation to and from the bubble's actual position
 - Responsive desktop/mobile scaling
+- Smooth milestone-based loading animation with a 0–100% progress line and Smile B credit
+- Smile B branding in the main header and `SB` minimized bubble
 - Item icons and local mail history
 - Live Fruit Price Stock refresh countdown
 

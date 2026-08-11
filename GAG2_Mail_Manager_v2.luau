@@ -14,6 +14,13 @@ local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
+local GuiParent = LocalPlayer:WaitForChild("PlayerGui")
+if type(gethui) == "function" then
+	local ok, result = pcall(gethui)
+	if ok and typeof(result) == "Instance" then GuiParent = result end
+else
+	pcall(function() GuiParent = CoreGui end)
+end
 local ENV = getgenv and getgenv() or _G
 local STATE_KEY = "SmileB_GAG2MailManager"
 local HISTORY_KEY = "SmileB_GAG2MailHistory"
@@ -30,6 +37,8 @@ local State = {
 	SendToken = 0,
 	Connections = {},
 	Gui = nil,
+	LoadingGui = nil,
+	InitialInventoryReady = false,
 	Resolved = nil,
 	Queue = {},
 	Filter = "All",
@@ -74,9 +83,157 @@ local function cleanup()
 	end
 	table.clear(State.Connections)
 	if State.Gui then State.Gui:Destroy() end
+	if State.LoadingGui then State.LoadingGui:Destroy() end
 	if ENV[STATE_KEY] == State then ENV[STATE_KEY] = nil end
 end
 State.Cleanup = cleanup
+
+-- Branded boot overlay. Progress advances only at real initialization stages.
+for _, root in ipairs({ LocalPlayer:FindFirstChildOfClass("PlayerGui"), GuiParent, CoreGui }) do
+	if typeof(root) == "Instance" then
+		pcall(function()
+			local previous = root:FindFirstChild("SmileB_GAG2MailLoading")
+			if previous then previous:Destroy() end
+		end)
+	end
+end
+local LoadingGui = Instance.new("ScreenGui")
+LoadingGui.Name = "SmileB_GAG2MailLoading"
+LoadingGui.ResetOnSpawn = false
+LoadingGui.IgnoreGuiInset = true
+LoadingGui.DisplayOrder = 10000
+LoadingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+if syn and type(syn.protect_gui) == "function" then pcall(syn.protect_gui, LoadingGui) end
+local loadingParented = pcall(function() LoadingGui.Parent = GuiParent end)
+if not loadingParented then LoadingGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+State.LoadingGui = LoadingGui
+
+local LoadingBackdrop = Instance.new("Frame")
+LoadingBackdrop.Name = "Backdrop"
+LoadingBackdrop.BackgroundColor3 = Color3.fromRGB(10, 13, 18)
+LoadingBackdrop.BackgroundTransparency = 0.08
+LoadingBackdrop.BorderSizePixel = 0
+LoadingBackdrop.Size = UDim2.fromScale(1, 1)
+LoadingBackdrop.Parent = LoadingGui
+local LoadingCard = Instance.new("Frame")
+LoadingCard.Name = "Card"
+LoadingCard.AnchorPoint = Vector2.new(0.5, 0.5)
+LoadingCard.BackgroundColor3 = Color3.fromRGB(22, 27, 36)
+LoadingCard.Position = UDim2.fromScale(0.5, 0.5)
+LoadingCard.Size = UDim2.new(1, -32, 0, 184)
+LoadingCard.Parent = LoadingBackdrop
+local loadingSize = Instance.new("UISizeConstraint"); loadingSize.MinSize = Vector2.new(280, 184); loadingSize.MaxSize = Vector2.new(440, 184); loadingSize.Parent = LoadingCard
+local loadingScale = Instance.new("UIScale"); loadingScale.Scale = 0.94; loadingScale.Parent = LoadingCard
+TweenService:Create(loadingScale, TweenInfo.new(0.48, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+local loadingCorner = Instance.new("UICorner"); loadingCorner.CornerRadius = UDim.new(0, 16); loadingCorner.Parent = LoadingCard
+local loadingStroke = Instance.new("UIStroke"); loadingStroke.Color = Color3.fromRGB(82, 211, 133); loadingStroke.Thickness = 1.4; loadingStroke.Transparency = 0.3; loadingStroke.Parent = LoadingCard
+local LoadingLogo = Instance.new("TextLabel")
+LoadingLogo.BackgroundColor3 = Color3.fromRGB(39, 142, 87)
+LoadingLogo.Position = UDim2.fromOffset(22, 20)
+LoadingLogo.Size = UDim2.fromOffset(58, 58)
+LoadingLogo.Font = Enum.Font.GothamBold
+LoadingLogo.Text = "SB"
+LoadingLogo.TextColor3 = Color3.fromRGB(255, 255, 255)
+LoadingLogo.TextSize = 20
+LoadingLogo.Parent = LoadingCard
+local logoCorner = Instance.new("UICorner"); logoCorner.CornerRadius = UDim.new(1, 0); logoCorner.Parent = LoadingLogo
+local logoGradient = Instance.new("UIGradient"); logoGradient.Color = ColorSequence.new(Color3.fromRGB(39, 142, 87), Color3.fromRGB(77, 148, 255)); logoGradient.Rotation = 35; logoGradient.Parent = LoadingLogo
+local LoadingTitle = Instance.new("TextLabel")
+LoadingTitle.BackgroundTransparency = 1
+LoadingTitle.Position = UDim2.fromOffset(96, 20)
+LoadingTitle.Size = UDim2.new(1, -118, 0, 30)
+LoadingTitle.Font = Enum.Font.GothamBold
+LoadingTitle.Text = "GAG2 Mail Manager"
+LoadingTitle.TextColor3 = Color3.fromRGB(240, 244, 250)
+LoadingTitle.TextSize = 20
+LoadingTitle.TextXAlignment = Enum.TextXAlignment.Left
+LoadingTitle.Parent = LoadingCard
+local LoadingCredit = Instance.new("TextLabel")
+LoadingCredit.BackgroundTransparency = 1
+LoadingCredit.Position = UDim2.fromOffset(97, 50)
+LoadingCredit.Size = UDim2.new(1, -118, 0, 22)
+LoadingCredit.Font = Enum.Font.GothamSemibold
+LoadingCredit.Text = "Credit: Smile B"
+LoadingCredit.TextColor3 = Color3.fromRGB(82, 211, 133)
+LoadingCredit.TextSize = 13
+LoadingCredit.TextXAlignment = Enum.TextXAlignment.Left
+LoadingCredit.Parent = LoadingCard
+local LoadingStatus = Instance.new("TextLabel")
+LoadingStatus.BackgroundTransparency = 1
+LoadingStatus.Position = UDim2.fromOffset(22, 94)
+LoadingStatus.Size = UDim2.new(1, -92, 0, 24)
+LoadingStatus.Font = Enum.Font.Gotham
+LoadingStatus.Text = "Starting..."
+LoadingStatus.TextColor3 = Color3.fromRGB(160, 173, 190)
+LoadingStatus.TextSize = 12
+LoadingStatus.TextXAlignment = Enum.TextXAlignment.Left
+LoadingStatus.Parent = LoadingCard
+local LoadingPercent = Instance.new("TextLabel")
+LoadingPercent.BackgroundTransparency = 1
+LoadingPercent.Position = UDim2.new(1, -68, 0, 94)
+LoadingPercent.Size = UDim2.fromOffset(46, 24)
+LoadingPercent.Font = Enum.Font.GothamSemibold
+LoadingPercent.Text = "0%"
+LoadingPercent.TextColor3 = Color3.fromRGB(240, 244, 250)
+LoadingPercent.TextSize = 12
+LoadingPercent.TextXAlignment = Enum.TextXAlignment.Right
+LoadingPercent.Parent = LoadingCard
+local LoadingTrack = Instance.new("Frame")
+LoadingTrack.BackgroundColor3 = Color3.fromRGB(39, 47, 60)
+LoadingTrack.BorderSizePixel = 0
+LoadingTrack.ClipsDescendants = true
+LoadingTrack.Position = UDim2.fromOffset(22, 128)
+LoadingTrack.Size = UDim2.new(1, -44, 0, 11)
+LoadingTrack.Parent = LoadingCard
+local trackCorner = Instance.new("UICorner"); trackCorner.CornerRadius = UDim.new(1, 0); trackCorner.Parent = LoadingTrack
+local LoadingFill = Instance.new("Frame")
+LoadingFill.BackgroundColor3 = Color3.fromRGB(82, 211, 133)
+LoadingFill.BorderSizePixel = 0
+LoadingFill.Size = UDim2.fromScale(0, 1)
+LoadingFill.Parent = LoadingTrack
+local fillCorner = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = LoadingFill
+local fillGradient = Instance.new("UIGradient"); fillGradient.Color = ColorSequence.new(Color3.fromRGB(82, 211, 133), Color3.fromRGB(77, 148, 255)); fillGradient.Parent = LoadingFill
+local LoadingHint = Instance.new("TextLabel")
+LoadingHint.BackgroundTransparency = 1
+LoadingHint.Position = UDim2.fromOffset(22, 146)
+LoadingHint.Size = UDim2.new(1, -44, 0, 20)
+LoadingHint.Font = Enum.Font.Gotham
+LoadingHint.Text = "Preparing your live inventory"
+LoadingHint.TextColor3 = Color3.fromRGB(105, 118, 136)
+LoadingHint.TextSize = 10
+LoadingHint.TextXAlignment = Enum.TextXAlignment.Left
+LoadingHint.Parent = LoadingCard
+
+local loadingProgress = 0
+local loadingTween
+local function setLoadingProgress(value, status)
+	if State.Dead or not LoadingGui.Parent then return end
+	value = math.clamp(math.floor(tonumber(value) or 0), loadingProgress, 100)
+	loadingProgress = value
+	if status then LoadingStatus.Text = status end
+	LoadingPercent.Text = tostring(value) .. "%"
+	if loadingTween then pcall(function() loadingTween:Cancel() end) end
+	loadingTween = TweenService:Create(LoadingFill, TweenInfo.new(0.42, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = UDim2.fromScale(value / 100, 1) })
+	loadingTween:Play()
+end
+local function finishLoading()
+	if State.Dead or not LoadingGui.Parent then return end
+	setLoadingProgress(100, "Ready")
+	task.wait(0.5)
+	for _, object in ipairs(LoadingGui:GetDescendants()) do
+		pcall(function()
+			local goals = {}
+			if object:IsA("GuiObject") then goals.BackgroundTransparency = 1 end
+			if object:IsA("TextLabel") or object:IsA("TextButton") then goals.TextTransparency = 1 end
+			if object:IsA("UIStroke") then goals.Transparency = 1 end
+			if next(goals) then TweenService:Create(object, TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goals):Play() end
+		end)
+	end
+	task.wait(0.34)
+	if State.LoadingGui == LoadingGui then State.LoadingGui = nil end
+	pcall(function() LoadingGui:Destroy() end)
+end
+setLoadingProgress(8, "Connecting to the game...")
 
 -- Live game modules and packet endpoints.
 local SharedModules = ReplicatedStorage:WaitForChild("SharedModules")
@@ -86,6 +243,7 @@ local MailboxControllerModule = Controllers:WaitForChild("MailboxController")
 local PacketModule = SharedModules:WaitForChild("Packet")
 local Packet = require(PacketModule)
 local PacketRemote = PacketModule:WaitForChild("RemoteEvent")
+setLoadingProgress(22, "Loading network packets...")
 
 for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitStockSnapshot", "FruitStockRequest" }) do
 	local deadline = os.clock() + 30
@@ -94,6 +252,7 @@ for _, packetName in ipairs({ "MailboxSendBatch", "MailboxLookupPlayer", "FruitS
 	end
 	assert(PacketRemote:GetAttribute(packetName) ~= nil, "Timed out waiting for network packet: " .. packetName)
 end
+setLoadingProgress(38, "Network ready")
 
 local Networking = {
 	Mailbox = {
@@ -153,6 +312,7 @@ local FruitProxyUtil = require(SharedModules:WaitForChild("FruitProxyUtil"))
 local MutationData = require(SharedModules:WaitForChild("MutationData"))
 local WeightFormat = require(SharedModules:WaitForChild("WeightFormat"))
 local MailboxFlags = require(SharedModules:WaitForChild("Flags"):WaitForChild("MailboxFlags"))
+setLoadingProgress(60, "Loading game modules...")
 
 local replicaDeadline = os.clock() + 60
 local nextLoadedClientScan = 0
@@ -174,6 +334,8 @@ end
 if not validInventoryReplica(Replica) then
 	error("Could not attach to the game's live PlayerState replica. Rejoin, wait for the normal inventory UI to load, then execute again.")
 end
+if State.Dead then return end
+setLoadingProgress(80, "Player inventory connected")
 
 local FRUIT_CATEGORY = "HarvestedFruits"
 local NOTE_CODEPOINT_LIMIT = 100
@@ -602,8 +764,7 @@ local function saveHistory()
 end
 
 -- UI.
-local GuiParent = LocalPlayer:WaitForChild("PlayerGui")
-if type(gethui) == "function" then local ok, result = pcall(gethui); if ok and typeof(result) == "Instance" then GuiParent = result end else pcall(function() GuiParent = CoreGui end) end
+setLoadingProgress(86, "Building the interface...")
 for _, root in ipairs({ LocalPlayer:FindFirstChildOfClass("PlayerGui"), GuiParent, CoreGui }) do
 	if typeof(root) == "Instance" then pcall(function() for _, child in ipairs(root:GetChildren()) do if child:IsA("ScreenGui") and child.Name == "SmileB_GAG2MailManager" then child:Destroy() end end end) end
 end
@@ -629,12 +790,14 @@ end
 bindCamera(); track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindCamera))
 
 local Header = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new(1, 0, 0, 48) }, Window)
-label(Header, "GAG2 Mail Manager", UDim2.fromOffset(16, 0), UDim2.new(0, 300, 1, 0), 17, COLORS.Text)
+label(Header, "GAG2 Mail Manager", UDim2.fromOffset(16, 0), UDim2.new(0, 190, 1, 0), 17, COLORS.Text)
+local HeaderCredit = label(Header, "Smile B", UDim2.fromOffset(205, 0), UDim2.fromOffset(92, 48), 12, COLORS.Green)
+HeaderCredit.Font = Enum.Font.GothamSemibold
 local StockTimer = label(Header, "Fruit stock: loading...", UDim2.new(1, -420, 0, 0), UDim2.fromOffset(320, 48), 13, COLORS.Yellow, Enum.TextXAlignment.Right)
 local MinimizeButton = button(Header, "-", UDim2.new(1, -82, 0, 8), UDim2.fromOffset(32, 32), COLORS.Panel2)
 local CloseButton = button(Header, "X", UDim2.new(1, -42, 0, 8), UDim2.fromOffset(32, 32), COLORS.Red)
-local MinimizedBubble = button(ScreenGui, "B", UDim2.new(1, -44, 0.5, 0), UDim2.fromOffset(58, 58), COLORS.Green2)
-MinimizedBubble.Name = "MinimizedBubble"; MinimizedBubble.AnchorPoint = Vector2.new(0.5, 0.5); MinimizedBubble.Visible = false; MinimizedBubble.ZIndex = 50; MinimizedBubble.TextSize = 22; MinimizedBubble.Font = Enum.Font.GothamBold
+local MinimizedBubble = button(ScreenGui, "SB", UDim2.new(1, -44, 0.5, 0), UDim2.fromOffset(58, 58), COLORS.Green2)
+MinimizedBubble.Name = "MinimizedBubble"; MinimizedBubble.AnchorPoint = Vector2.new(0.5, 0.5); MinimizedBubble.Visible = false; MinimizedBubble.ZIndex = 50; MinimizedBubble.TextSize = 18; MinimizedBubble.Font = Enum.Font.GothamBold
 corner(MinimizedBubble, 29); stroke(MinimizedBubble, COLORS.Green, 2); new("UIGradient", { Color = ColorSequence.new(COLORS.Green2, COLORS.Blue), Rotation = 45 }, MinimizedBubble)
 
 local Nav = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 54), Size = UDim2.new(1, -24, 0, 34) }, Window)
@@ -769,6 +932,7 @@ requestInventoryRefresh = function()
 				local ok, entries = pcall(buildInventoryEntries, token)
 				if ok and type(entries) == "table" and not State.Dead and token == State.InventoryScanToken then
 					State.InventoryCache = entries
+					State.InitialInventoryReady = true
 					local currentByKey = {}; for _, item in ipairs(entries) do currentByKey[item.Key] = item end
 					for key, queued in pairs(State.Queue) do
 						local current = currentByKey[key]
@@ -999,7 +1163,12 @@ track(SendButton.Activated:Connect(beginSend)); track(HistorySearch:GetPropertyC
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))
 
 -- Slow/background refresh loops. No large one-frame catalog or inventory traversal.
+setLoadingProgress(92, "Loading catalog and inventory...")
 requestStockSnapshot(); scanPlantCatalog(); requestInventoryRefresh(); rebuildInventoryUI(); rebuildQueueUI(); rebuildHistoryUI(); updateCatalogInfo()
 task.spawn(function() while not State.Dead do updateStockTimer(); if not State.Sending then resetSendUi() end; if State.Stock.NextRefreshUnix <= os.time() + State.Stock.ClockOffset then requestStockSnapshot() end; task.wait(1) end end)
 task.spawn(function() while not State.Dead do requestInventoryRefresh(); task.wait(1) end end)
+local initialInventoryDeadline = os.clock() + 8
+while not State.Dead and not State.InitialInventoryReady and os.clock() < initialInventoryDeadline do task.wait(0.05) end
+if State.Dead then return end
+finishLoading()
 setStatus("Ready. Building the live plant catalog in the background...", COLORS.Green)
