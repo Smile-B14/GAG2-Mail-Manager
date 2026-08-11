@@ -53,6 +53,7 @@ local State = {
 	AutoCollect = {
 		Enabled = AutoPreferences.Enabled == true,
 		AutoSell = AutoPreferences.AutoSell == true,
+		CollectMutated = AutoPreferences.CollectMutated == true,
 		Rules = AutoPreferences.Rules,
 		Catalog = {},
 		Cooldowns = {},
@@ -955,8 +956,9 @@ AutoUI.Header = new("Frame", { BackgroundColor3 = COLORS.Panel, Size = UDim2.new
 label(AutoUI.Header, "Automatic garden collection", UDim2.fromOffset(14, 8), UDim2.fromOffset(260, 24), 15, COLORS.Text)
 AutoUI.EnableButton = button(AutoUI.Header, "Auto Collect: OFF", UDim2.fromOffset(14, 38), UDim2.fromOffset(160, 38), COLORS.Panel2)
 AutoUI.SellButton = button(AutoUI.Header, "Auto Sell: OFF", UDim2.fromOffset(184, 38), UDim2.fromOffset(150, 38), COLORS.Panel2)
-AutoUI.Summary = label(AutoUI.Header, "0 produce selected", UDim2.fromOffset(350, 34), UDim2.new(1, -364, 0, 24), 13, COLORS.Green)
-AutoUI.Status = label(AutoUI.Header, State.AutoCollect.LastMessage, UDim2.fromOffset(350, 58), UDim2.new(1, -364, 0, 25), 12, COLORS.Muted)
+AutoUI.MutationButton = button(AutoUI.Header, "Grab Mutated: OFF", UDim2.fromOffset(344, 38), UDim2.fromOffset(170, 38), COLORS.Panel2)
+AutoUI.Summary = label(AutoUI.Header, "0 produce selected", UDim2.fromOffset(530, 34), UDim2.new(1, -544, 0, 24), 13, COLORS.Green)
+AutoUI.Status = label(AutoUI.Header, State.AutoCollect.LastMessage, UDim2.fromOffset(530, 58), UDim2.new(1, -544, 0, 25), 12, COLORS.Muted)
 label(AutoUI.Header, "Auto Sell uses the game's Sell All endpoint (favorited fruit stays protected).", UDim2.fromOffset(14, 78), UDim2.new(1, -28, 0, 18), 10, COLORS.Muted)
 AutoUI.Search = box(AutoUI.Page, "Search produce", UDim2.fromOffset(0, 110), UDim2.new(1, 0, 0, 36))
 label(AutoUI.Page, "SELECT     PRODUCE                         THRESHOLD       UNIT                 CONDITION", UDim2.fromOffset(8, 150), UDim2.new(1, -16, 0, 22), 10, COLORS.Muted)
@@ -985,6 +987,7 @@ end
 function AutoUI.savePreferences()
 	AutoPreferences.Enabled = State.AutoCollect.Enabled
 	AutoPreferences.AutoSell = State.AutoCollect.AutoSell
+	AutoPreferences.CollectMutated = State.AutoCollect.CollectMutated
 	AutoPreferences.Rules = State.AutoCollect.Rules
 	ENV[AUTO_CONFIG_KEY] = AutoPreferences
 end
@@ -1014,6 +1017,8 @@ function AutoUI.refreshHeader()
 	AutoUI.EnableButton.BackgroundColor3 = State.AutoCollect.Enabled and COLORS.Green2 or COLORS.Panel2
 	AutoUI.SellButton.Text = "Auto Sell: " .. (State.AutoCollect.AutoSell and "ON" or "OFF")
 	AutoUI.SellButton.BackgroundColor3 = State.AutoCollect.AutoSell and COLORS.Green2 or COLORS.Panel2
+	AutoUI.MutationButton.Text = "Grab Mutated: " .. (State.AutoCollect.CollectMutated and "ON" or "OFF")
+	AutoUI.MutationButton.BackgroundColor3 = State.AutoCollect.CollectMutated and COLORS.Green2 or COLORS.Panel2
 	AutoUI.Summary.Text = string.format("%d produce selected  •  %s harvested", selected, formatNumber(State.AutoCollect.Harvested))
 	AutoUI.Status.Text = State.AutoCollect.LastMessage
 end
@@ -1177,7 +1182,7 @@ function AutoUI.runPass()
 					if type(plantId) == "string" and rule and rule.Enabled then
 						if entry.IsSingleHarvest then
 							if AutoUI.isGrown(plant) then
-								if AutoUI.hasMutation(plant) then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = plant, Plant = plant, PlantId = plantId, FruitId = "", Entry = entry, Rule = rule, Single = true } end
+								if AutoUI.hasMutation(plant) and not auto.CollectMutated then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = plant, Plant = plant, PlantId = plantId, FruitId = "", Entry = entry, Rule = rule, Single = true } end
 							end
 						else
 							local fruits = plant:FindFirstChild("Fruits")
@@ -1187,7 +1192,7 @@ function AutoUI.runPass()
 									if scanned % 200 == 0 then task.wait() end
 									local fruitId = fruit:GetAttribute("FruitId")
 									if type(fruitId) == "string" and AutoUI.isGrown(fruit) then
-										if AutoUI.hasMutation(fruit) or AutoUI.hasMutation(plant) then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = fruit, Plant = plant, PlantId = plantId, FruitId = fruitId, Entry = entry, Rule = rule, Single = false } end
+										if (AutoUI.hasMutation(fruit) or AutoUI.hasMutation(plant)) and not auto.CollectMutated then mutatedSkipped += 1 else candidates[#candidates + 1] = { Instance = fruit, Plant = plant, PlantId = plantId, FruitId = fruitId, Entry = entry, Rule = rule, Single = false } end
 									end
 								end
 							end
@@ -1541,6 +1546,11 @@ end))
 track(AutoUI.SellButton.Activated:Connect(function()
 	State.AutoCollect.AutoSell = not State.AutoCollect.AutoSell
 	State.AutoCollect.LastMessage = State.AutoCollect.AutoSell and "Auto Sell enabled | checking inventory every 5 seconds" or "Auto Sell disabled"
+	AutoUI.savePreferences(); AutoUI.refreshHeader()
+end))
+track(AutoUI.MutationButton.Activated:Connect(function()
+	State.AutoCollect.CollectMutated = not State.AutoCollect.CollectMutated
+	State.AutoCollect.LastMessage = State.AutoCollect.CollectMutated and "Mutated produce will be collected when it matches the rule" or "Mutated produce will be skipped"
 	AutoUI.savePreferences(); AutoUI.refreshHeader()
 end))
 track(Networking.FruitStock.Snapshot.OnClientEvent:Connect(applyStockSnapshot))

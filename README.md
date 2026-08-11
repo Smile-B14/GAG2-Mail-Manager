@@ -46,7 +46,7 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Per-produce Auto Collect rules with persisted selection, weight/height metric, threshold, and above/below condition
 - Authoritative own-garden scanning using the game's `UserId`, `PlantId`, `FruitId`, `Age`, and `MaxAge` attributes
 - Exact game weight calculations in kilograms (the game value is already kg) plus rendered-height measurement for Bamboo and other whole plants
-- Mutated plants and fruit are always skipped by Auto Collect
+- Persistent `Grab Mutated` toggle; mutated plants and fruit are skipped by default and collected only when explicitly enabled
 - Rate-limited harvest batches using the game's `Garden.CollectFruit` packet
 - Optional timeout-safe Auto Sell checks live inventory every five seconds using the game's `NPCS.SellAll` response; server-protected favorited fruit is not sold
 - Item icons and local mail history
