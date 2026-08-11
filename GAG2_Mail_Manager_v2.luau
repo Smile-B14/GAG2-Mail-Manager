@@ -108,14 +108,73 @@ local Networking = {
 	},
 }
 
-local PlayerStateClient = require(ClientModules:WaitForChild("PlayerStateClient"))
+local PlayerStateClientModule = ClientModules:WaitForChild("PlayerStateClient")
+local function validInventoryReplica(candidate)
+	return type(candidate) == "table" and type(candidate.Data) == "table" and type(candidate.Data.Inventory) == "table"
+end
+local function replicaFromClient(client)
+	if type(client) ~= "table" or type(client.GetLocalReplica) ~= "function" then return nil end
+	local ok, candidate = pcall(client.GetLocalReplica, client)
+	if ok and validInventoryReplica(candidate) then return candidate end
+	return nil
+end
+local function findLoadedPlayerStateClient()
+	if type(getgc) ~= "function" then return nil, nil end
+	local ok, objects = pcall(getgc, true)
+	if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
+	if not ok or type(objects) ~= "table" then return nil, nil end
+	local fallbackClient
+	for index, object in ipairs(objects) do
+		if type(object) == "table" and type(rawget(object, "GetLocalReplica")) == "function" and type(rawget(object, "WaitForLocalReplica")) == "function" then
+			fallbackClient = fallbackClient or object
+			local candidate = replicaFromClient(object)
+			if candidate then return object, candidate end
+		end
+		if index % 500 == 0 then task.wait() end
+	end
+	return fallbackClient, nil
+end
+local function requirePlayerStateClient()
+	if type(getrenv) == "function" then
+		local envOk, gameEnvironment = pcall(getrenv)
+		if envOk and type(gameEnvironment) == "table" and type(gameEnvironment.require) == "function" then
+			local ok, client = pcall(gameEnvironment.require, PlayerStateClientModule)
+			if ok and type(client) == "table" then return client end
+		end
+	end
+	local ok, client = pcall(require, PlayerStateClientModule)
+	if ok and type(client) == "table" then return client end
+	return nil
+end
+local PlayerStateClient, Replica = findLoadedPlayerStateClient()
+if not PlayerStateClient then PlayerStateClient = requirePlayerStateClient() end
+
 local MailboxItemCatalog = require(MailboxControllerModule:WaitForChild("MailboxItemCatalog"))
 local FruitValueCalc = require(SharedModules:WaitForChild("FruitValueCalc"))
 local MutationData = require(SharedModules:WaitForChild("MutationData"))
 local WeightFormat = require(SharedModules:WaitForChild("WeightFormat"))
 local MailboxFlags = require(SharedModules:WaitForChild("Flags"):WaitForChild("MailboxFlags"))
-local Replica = PlayerStateClient:WaitForLocalReplica(30)
-assert(Replica and Replica.Data and Replica.Data.Inventory, "Player inventory replica did not load")
+
+local replicaDeadline = os.clock() + 60
+local nextLoadedClientScan = 0
+while not validInventoryReplica(Replica) and os.clock() < replicaDeadline do
+	Replica = replicaFromClient(PlayerStateClient)
+	if validInventoryReplica(Replica) then break end
+	if os.clock() >= nextLoadedClientScan then
+		local loadedClient, loadedReplica = findLoadedPlayerStateClient()
+		if loadedClient then PlayerStateClient, Replica = loadedClient, loadedReplica end
+		nextLoadedClientScan = os.clock() + 2
+	end
+	if not validInventoryReplica(Replica) and PlayerStateClient and type(PlayerStateClient.WaitForLocalReplica) == "function" then
+		local ok, candidate = pcall(PlayerStateClient.WaitForLocalReplica, PlayerStateClient, 1)
+		if ok and validInventoryReplica(candidate) then Replica = candidate end
+	else
+		task.wait(0.25)
+	end
+end
+if not validInventoryReplica(Replica) then
+	error("Could not attach to the game's live PlayerState replica. Rejoin, wait for the normal inventory UI to load, then execute again.")
+end
 
 local FRUIT_CATEGORY = "HarvestedFruits"
 local NOTE_CODEPOINT_LIMIT = 100

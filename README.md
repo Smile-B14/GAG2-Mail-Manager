@@ -24,6 +24,7 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Primary runtime catalog discovery from the game's `Assets.Fruits`, `Assets.Plants`, and `Assets.Seeds` folders, supplemented by fruit-, plant-, crop-, item-, catalog-, and data-oriented modules
 - Batched/yielding catalog and inventory scans to reduce frame stalls
 - Catalog learning from the live inventory, owned seed names, tool metadata, and Fruit Price Stock entries
+- Replica-safe startup that reuses the game's already-loaded `PlayerStateClient` before attempting an executor-local module require
 - Live inventory refresh for grown fruits, seeds, and gear
 - Grown-fruit discovery from the authoritative `Inventory.HarvestedFruits` table, with deep inventory and Backpack/Character tool fallbacks using stable inventory IDs
 - Fruit mutation, weight, size multiplier, mutation multiplier, Fruit Price Stock multiplier, and live Sheckles value
