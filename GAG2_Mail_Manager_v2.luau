@@ -1,5 +1,5 @@
 -- Grow a Garden 2 - Mail Manager v2
--- Runtime plant-catalog discovery, harvested-fruit inventory matching,
+-- Exact asset-catalog discovery, authoritative harvested-fruit inventory,
 -- live fruit values, large mail payloads, and non-blocking send responses.
 
 if not game:IsLoaded() then
@@ -43,8 +43,6 @@ local State = {
 		Ready = false,
 		Scanning = false,
 		ScanToken = 0,
-		ScannedModules = 0,
-		TotalModules = 0,
 	},
 	Stock = {
 		Entries = {},
@@ -181,11 +179,7 @@ local NOTE_CODEPOINT_LIMIT = 100
 local SEND_RESPONSE_TIMEOUT = 8
 local SEND_RECONCILE_SECONDS = 2.5
 local HISTORY_LIMIT = 250
-local CATALOG_MODULE_BATCH = 3
-local CATALOG_REQUIRE_TIMEOUT = 0.75
-local CATALOG_DISCOVERY_BATCH = 250
 local CATALOG_ASSET_BATCH = 20
-local INVENTORY_SCAN_BATCH = 120
 local UI_ROW_BATCH = 12
 
 local COLORS = {
@@ -315,38 +309,6 @@ local function addPlantName(name)
 	end
 end
 
-local ITEM_HINT_FIELDS = {
-	DisplayName = true, Name = true, FruitName = true, PlantName = true, SeedName = true,
-	Icon = true, Image = true, Price = true, BaseValue = true, Rarity = true,
-	GrowthTime = true, Weight = true, SizeMultiplier = true,
-}
-local function tableLooksLikeItemDefinition(value)
-	if type(value) ~= "table" then return false end
-	for field in pairs(ITEM_HINT_FIELDS) do if value[field] ~= nil then return true end end
-	return false
-end
-local function harvestCatalogTable(value, depth, strongContext)
-	if type(value) ~= "table" or depth > 5 then return end
-	local visited = 0
-	for key, child in pairs(value) do
-		visited += 1
-		if type(child) == "table" then
-			local childLooksLikeItem = tableLooksLikeItemDefinition(child)
-			if type(key) == "string" and (childLooksLikeItem or (strongContext and depth <= 2)) then addPlantName(key) end
-			for _, field in ipairs({ "DisplayName", "Name", "FruitName", "PlantName", "SeedName", "CropName" }) do
-				if type(child[field]) == "string" then addPlantName(child[field]) end
-			end
-			local keyText = type(key) == "string" and string.lower(key) or ""
-			local childContext = strongContext or keyText:find("fruit", 1, true) ~= nil or keyText:find("plant", 1, true) ~= nil
-				or keyText:find("crop", 1, true) ~= nil or keyText:find("seed", 1, true) ~= nil or keyText:find("produce", 1, true) ~= nil
-			harvestCatalogTable(child, depth + 1, childContext)
-		elseif type(key) == "string" and strongContext and (type(child) == "number" or type(child) == "string") then
-			addPlantName(key)
-		end
-		if visited % 200 == 0 then task.wait() end
-	end
-end
-
 local rebuildInventoryUI
 local rebuildQueueUI
 local rebuildHistoryUI
@@ -357,31 +319,10 @@ local function updateCatalogInfo()
 	if not CatalogInfo then return end
 	local count = 0; for _ in pairs(State.PlantCatalog.Names) do count += 1 end
 	if State.PlantCatalog.Scanning then
-		CatalogInfo.Text = string.format("Plant catalog: scanning %s/%s modules\n%s plant/fruit names found", formatNumber(State.PlantCatalog.ScannedModules), formatNumber(State.PlantCatalog.TotalModules), formatNumber(count))
+		CatalogInfo.Text = string.format("Plant catalog: scanning exact game assets\n%s plant/fruit names found", formatNumber(count))
 	else
 		CatalogInfo.Text = string.format("Plant catalog: %s names loaded\nInventory updates automatically", formatNumber(count))
 	end
-end
-
-local function catalogModulePriority(module)
-	local text = string.lower(module:GetFullName())
-	if text:find("fruit", 1, true) or text:find("plant", 1, true) or text:find("crop", 1, true)
-		or text:find("seed", 1, true) or text:find("produce", 1, true) or text:find("harvest", 1, true) then return 1 end
-	if text:find("catalog", 1, true) or text:find("item", 1, true) or text:find("data", 1, true)
-		or text:find("config", 1, true) or text:find("definition", 1, true) or text:find("asset", 1, true) then return 2 end
-	return nil
-end
-
-local function requireCatalogModule(module, token)
-	local result = { Done = false }
-	task.spawn(function()
-		local ok, data = pcall(require, module)
-		result.Ok, result.Data, result.Done = ok, data, true
-	end)
-	local deadline = os.clock() + CATALOG_REQUIRE_TIMEOUT
-	while not result.Done and not State.Dead and token == State.PlantCatalog.ScanToken and os.clock() < deadline do task.wait(0.03) end
-	if result.Done and result.Ok and type(result.Data) == "table" then return result.Data end
-	return nil
 end
 
 local function scanAssetCatalog(token)
@@ -414,46 +355,10 @@ local function scanPlantCatalog()
 	local token = State.PlantCatalog.ScanToken
 	scanAssetCatalog(token)
 	if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
-	local modules = {}
-	for index, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
-		if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
-		if descendant:IsA("ModuleScript") then
-			local priority = catalogModulePriority(descendant)
-			if priority then modules[#modules + 1] = { Module = descendant, Priority = priority } end
-		end
-		if index % CATALOG_DISCOVERY_BATCH == 0 then updateCatalogInfo(); task.wait() end
-	end
-	table.sort(modules, function(a, b)
-		if a.Priority ~= b.Priority then return a.Priority < b.Priority end
-		return a.Module:GetFullName() < b.Module:GetFullName()
-	end)
-	State.PlantCatalog.TotalModules = #modules
-	State.PlantCatalog.ScannedModules = 0
+	State.PlantCatalog.Scanning = false
+	State.PlantCatalog.Ready = true
 	updateCatalogInfo()
-	task.spawn(function()
-		for index, candidate in ipairs(modules) do
-			if State.Dead or token ~= State.PlantCatalog.ScanToken then return end
-			local module = candidate.Module
-			local data = requireCatalogModule(module, token)
-			if data then
-				local path = string.lower(module:GetFullName())
-				local strong = path:find("fruit", 1, true) ~= nil or path:find("plant", 1, true) ~= nil or path:find("crop", 1, true) ~= nil
-					or path:find("seed", 1, true) ~= nil or path:find("produce", 1, true) ~= nil or path:find("harvest", 1, true) ~= nil
-				harvestCatalogTable(data, 0, strong)
-			end
-			State.PlantCatalog.ScannedModules = index
-			if index % CATALOG_MODULE_BATCH == 0 then
-				updateCatalogInfo()
-				if requestInventoryRefresh then requestInventoryRefresh() end
-				task.wait()
-			end
-		end
-		if token ~= State.PlantCatalog.ScanToken then return end
-		State.PlantCatalog.Scanning = false
-		State.PlantCatalog.Ready = true
-		updateCatalogInfo()
-		if requestInventoryRefresh then requestInventoryRefresh() end
-	end)
+	if requestInventoryRefresh then requestInventoryRefresh() end
 end
 
 local function firstField(value, fields)
@@ -462,37 +367,14 @@ local function firstField(value, fields)
 	return nil
 end
 local NAME_FIELDS = { "FruitName", "fruitName", "PlantName", "plantName", "CropName", "cropName", "Name", "name", "DisplayName", "displayName" }
-local ID_FIELDS = { "Id", "ID", "id", "Uuid", "UUID", "uuid", "Uid", "UID", "uid", "Guid", "GUID", "guid", "ItemId", "ItemID", "itemId", "InventoryId", "InventoryID", "inventoryId", "UniqueId", "UniqueID", "uniqueId" }
 local MUTATION_FIELDS = { "Mutation", "mutation", "MutationName", "mutationName" }
 local WEIGHT_FIELDS = { "Weight", "weight", "WeightGrams", "weightGrams", "Grams", "grams" }
 local SIZE_FIELDS = { "SizeMultiplier", "sizeMultiplier", "Size", "size" }
 local DECAY_FIELDS = { "DecayAlpha", "decayAlpha", "Decay", "decay" }
-local COUNT_FIELDS = { "Count", "count", "Amount", "amount", "Quantity", "quantity", "Stack", "stack" }
-local FAVORITE_FIELDS = { "IsFavorite", "isFavorite", "Favorite", "favorite", "Favorited", "favorited", "IsFavorited", "isFavorited" }
-
 local function isFavorited(value)
-	if type(value) ~= "table" then return false end
-	for _, field in ipairs(FAVORITE_FIELDS) do
-		local favorite = value[field]
-		if favorite == true or favorite == 1 or favorite == "true" then return true end
-	end
-	return false
+	return type(value) == "table" and value.IsFavorite == true
 end
 
-local function fuzzyId(value)
-	local direct = firstField(value, ID_FIELDS)
-	if direct ~= nil and tostring(direct) ~= "" then return direct end
-	if type(value) ~= "table" then return nil end
-	for key, fieldValue in pairs(value) do
-		if type(key) == "string" and (type(fieldValue) == "string" or type(fieldValue) == "number") then
-			local lower = string.lower(key)
-			if lower ~= "userid" and (lower:find("uuid", 1, true) or lower:find("guid", 1, true) or lower:match("id$")) then
-				if tostring(fieldValue) ~= "" then return fieldValue end
-			end
-		end
-	end
-	return nil
-end
 local function normalizeFruitEntry(entryValue, fallbackName)
 	if type(entryValue) ~= "table" then return {} end
 	local normalized = table.clone(entryValue)
@@ -516,52 +398,8 @@ local function bestCatalogMatch(rawName)
 	end
 	return best
 end
-local function pathIsNonFruit(path)
-	path = string.lower(path or "")
-	return path:find("/seeds", 1, true) or path:find("/pets", 1, true) or path:find("/gears", 1, true)
-		or path:find("/gear", 1, true) or path:find("/tools", 1, true)
-end
-local function fruitSignalScore(value)
-	if type(value) ~= "table" then return 0 end
-	local score = 0
-	if fuzzyId(value) ~= nil then score += 2 end
-	if firstField(value, MUTATION_FIELDS) ~= nil then score += 3 end
-	if firstField(value, WEIGHT_FIELDS) ~= nil then score += 3 end
-	if firstField(value, SIZE_FIELDS) ~= nil then score += 2 end
-	if firstField(value, DECAY_FIELDS) ~= nil then score += 1 end
-	if value.FruitName ~= nil or value.fruitName ~= nil then score += 4 end
-	return score
-end
-local function entryCatalogName(containerKey, entryValue)
-	local explicit = firstField(entryValue, NAME_FIELDS)
-	return bestCatalogMatch(explicit or (type(containerKey) == "string" and containerKey or ""))
-end
-
 local function inventoryScanActive(token)
 	return not State.Dead and token == State.InventoryScanToken
-end
-
-local function learnPlantNamesFromInventory(container, depth, path, counter, token)
-	if type(container) ~= "table" or depth > 8 or not inventoryScanActive(token) then return end
-	for containerKey, entryValue in pairs(container) do
-		counter.n += 1
-		if counter.n % INVENTORY_SCAN_BATCH == 0 then
-			task.wait()
-			if not inventoryScanActive(token) then return end
-		end
-		if type(entryValue) == "table" then
-			local childPath = path .. "/" .. tostring(containerKey)
-			local pathLower = string.lower(childPath)
-			local fruitContext = pathLower:find("fruit", 1, true) or pathLower:find("harvest", 1, true)
-				or pathLower:find("produce", 1, true) or pathLower:find("crop", 1, true)
-			local explicit = firstField(entryValue, NAME_FIELDS)
-			if fruitContext or fruitSignalScore(entryValue) >= 3 then
-				if type(explicit) == "string" then addPlantName(explicit) end
-				if fruitContext and type(containerKey) == "string" then addPlantName(containerKey) end
-			end
-			learnPlantNamesFromInventory(entryValue, depth + 1, childPath, counter, token)
-		end
-	end
 end
 
 local function normalizeImage(image)
@@ -612,95 +450,6 @@ local function fruitDetails(entryValue, itemKey)
 	return string.format("%s | %s | size %s | mut %s | stock %s", mutation, formattedWeight, formatMultiplier(normalized.SizeMultiplier), formatMultiplier(mutationMultiplier), formatMultiplier(stockMultiplier(normalized.FruitName or itemKey)))
 end
 
-local function fruitAvailable(entryValue)
-	local count = tonumber(firstField(entryValue, COUNT_FIELDS))
-	if count and count > 0 then return math.max(1, math.floor(count)) end
-	return 1
-end
-local function addFruitCandidate(output, seen, containerKey, entryValue, source, iconOverride, forcedName)
-	if type(entryValue) ~= "table" or isFavorited(entryValue) then return end
-	local id = fuzzyId(entryValue)
-	local itemKey = containerKey
-	if itemKey == nil or type(itemKey) == "number" then itemKey = id or itemKey end
-	if itemKey == nil then return end
-	-- Numeric array positions are not safe transport IDs unless an explicit ID exists.
-	if type(containerKey) == "number" and id == nil then return end
-	local normalized = normalizeFruitEntry(entryValue, forcedName or (type(containerKey) == "string" and containerKey or nil))
-	local identity = tostring(id or itemKey)
-	if identity == "" or seen[identity] then return end
-	seen[identity] = true
-	output[#output + 1] = { ItemKey = itemKey, EntryValue = normalized, Available = fruitAvailable(normalized), Source = source, Icon = normalizeImage(iconOverride) }
-end
-
-local function collectFruitEntries(container, output, seen, depth, path, counter, token)
-	if type(container) ~= "table" or depth > 8 or not inventoryScanActive(token) then return end
-	for containerKey, entryValue in pairs(container) do
-		counter.n += 1
-		if counter.n % INVENTORY_SCAN_BATCH == 0 then
-			task.wait()
-			if not inventoryScanActive(token) then return end
-		end
-		local childPath = path .. "/" .. tostring(containerKey)
-		if type(entryValue) == "table" then
-			local nameMatch = entryCatalogName(containerKey, entryValue)
-			local score = fruitSignalScore(entryValue)
-			local pathLower = string.lower(childPath)
-			local fruitContext = pathLower:find("fruit", 1, true) or pathLower:find("harvest", 1, true) or pathLower:find("produce", 1, true) or pathLower:find("crop", 1, true)
-			if not pathIsNonFruit(childPath) and (score >= 4 or fruitContext or nameMatch) then
-				addFruitCandidate(output, seen, containerKey, entryValue, childPath, nil, nameMatch and State.PlantCatalog.Display[nameMatch] or nil)
-			else
-				collectFruitEntries(entryValue, output, seen, depth + 1, childPath, counter, token)
-			end
-		end
-	end
-end
-
-local function toolData(tool)
-	local data = {}
-	local ok, attributes = pcall(tool.GetAttributes, tool)
-	if ok and type(attributes) == "table" then for key, value in pairs(attributes) do data[key] = value end end
-	for _, descendant in ipairs(tool:GetDescendants()) do
-		if descendant:IsA("StringValue") or descendant:IsA("NumberValue") or descendant:IsA("IntValue") then
-			local lower = string.lower(descendant.Name)
-			if lower:find("id", 1, true) or lower:find("uuid", 1, true) or lower:find("guid", 1, true) or lower:find("weight", 1, true) or lower:find("mutation", 1, true) then
-				data[descendant.Name] = descendant.Value
-			end
-		end
-	end
-	local match = bestCatalogMatch(tool.Name)
-	if match then data.FruitName = State.PlantCatalog.Display[match] or tool.Name end
-	data.DisplayName = data.DisplayName or tool.Name
-	return data, match
-end
-local function collectToolFruits(output, seen, token)
-	local function inspect(container)
-		if not container then return end
-		for _, child in ipairs(container:GetChildren()) do
-			if not inventoryScanActive(token) then return end
-			if child:IsA("Tool") then
-				local data, match = toolData(child)
-				if match and fuzzyId(data) ~= nil then addFruitCandidate(output, seen, fuzzyId(data), data, "Tool:" .. child.Name, child.TextureId, State.PlantCatalog.Display[match]) end
-			end
-		end
-	end
-	inspect(LocalPlayer:FindFirstChildOfClass("Backpack")); inspect(LocalPlayer.Character)
-end
-
-local function favoritedToolIds()
-	local ids = {}
-	local function inspect(container)
-		if not container then return end
-		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("IsFavorite") == true then
-				local id = child:GetAttribute("Id") or child:GetAttribute("PetId") or child:GetAttribute("InventoryId") or child:GetAttribute("UniqueId")
-				if id ~= nil and tostring(id) ~= "" then ids[tostring(id)] = true end
-			end
-		end
-	end
-	inspect(LocalPlayer:FindFirstChildOfClass("Backpack")); inspect(LocalPlayer.Character)
-	return ids
-end
-
 local function mailableCategories()
 	local categories = {}
 	if type(MailboxItemCatalog.Categories) == "table" then
@@ -718,6 +467,9 @@ end
 
 local function buildInventoryEntries(token)
 	local output = {}; local inventory = Replica and Replica.Data and Replica.Data.Inventory or {}
+	-- Match the official mailbox inventory loop exactly: stackable categories are
+	-- numeric counts, Pets are not exposed here, and harvested fruit comes only
+	-- from the authoritative Inventory.HarvestedFruits table.
 	for _, category in ipairs(mailableCategories()) do
 		if not inventoryScanActive(token) then return nil end
 		local categoryData = inventory[category]
@@ -725,44 +477,28 @@ local function buildInventoryEntries(token)
 			for itemKey, entryValue in pairs(categoryData) do
 				if not inventoryScanActive(token) then return nil end
 				local available = type(entryValue) == "number" and math.max(0, math.floor(entryValue)) or 0
-				if available > 0 and not isFavorited(entryValue) then
+				if available > 0 then
 					local displayName, icon = resolveItem(category, itemKey, entryValue)
-					if category == "Seeds" then addPlantName(stripSeedSuffix(displayName)) end
 					output[#output + 1] = { Key = category .. "\31" .. tostring(itemKey), Category = category, Group = groupFor(category), ItemKey = itemKey, EntryValue = entryValue, Available = available, DisplayName = displayName, Icon = icon, LiveValue = 0 }
 				end
 			end
 		end
 		task.wait()
 	end
-	local fruits = {}; local seen = favoritedToolIds(); local counter = { n = 0 }
 	local harvested = inventory[FRUIT_CATEGORY]
 	if type(harvested) == "table" then
 		for itemKey, entryValue in pairs(harvested) do
 			if not inventoryScanActive(token) then return nil end
-			if isFavorited(entryValue) then
-				local favoriteId = fuzzyId(entryValue) or itemKey
-				if favoriteId ~= nil then seen[tostring(favoriteId)] = true end
-			else
-				addFruitCandidate(fruits, seen, itemKey, entryValue, "Inventory/" .. FRUIT_CATEGORY)
+			if type(entryValue) == "table" and entryValue.Id ~= nil and not isFavorited(entryValue) then
+				local normalized = normalizeFruitEntry(entryValue, tostring(itemKey))
+				local displayName, icon = resolveItem(FRUIT_CATEGORY, itemKey, normalized)
+				output[#output + 1] = {
+					Key = FRUIT_CATEGORY .. "\31" .. tostring(itemKey), Category = FRUIT_CATEGORY, Group = "Fruits",
+					ItemKey = itemKey, EntryValue = normalized, Available = 1,
+					DisplayName = displayName, Icon = icon, LiveValue = fruitLiveValue(normalized, itemKey),
+				}
 			end
 		end
-	end
-	if type(inventory) == "table" then
-		learnPlantNamesFromInventory(inventory, 0, "Inventory", { n = 0 }, token)
-		if not inventoryScanActive(token) then return nil end
-		collectFruitEntries(inventory, fruits, seen, 0, "Inventory", counter, token)
-	end
-	if not inventoryScanActive(token) then return nil end
-	collectToolFruits(fruits, seen, token)
-	for _, fruit in ipairs(fruits) do
-		if not inventoryScanActive(token) then return nil end
-		local displayName, icon = resolveItem(FRUIT_CATEGORY, fruit.ItemKey, fruit.EntryValue)
-		if icon == "" then icon = fruit.Icon or "" end
-		output[#output + 1] = {
-			Key = FRUIT_CATEGORY .. "\31" .. tostring(fruit.ItemKey), Category = FRUIT_CATEGORY, Group = "Fruits",
-			ItemKey = fruit.ItemKey, EntryValue = fruit.EntryValue, Available = fruit.Available or 1,
-			DisplayName = displayName, Icon = icon, LiveValue = fruitLiveValue(fruit.EntryValue, fruit.ItemKey),
-		}
 	end
 	table.sort(output, function(a, b)
 		if a.Group ~= b.Group then return a.Group < b.Group end
@@ -988,7 +724,7 @@ local function applyStockSnapshot(snapshot)
 	if type(snapshot.entries) == "table" then
 		local entries = {}
 		for fruitName, entry in pairs(snapshot.entries) do
-			if type(fruitName) == "string" and type(entry) == "table" then entries[fruitName] = { multiplier = tonumber(entry.multiplier) or 1, tier = tostring(entry.tier or "normal") }; addPlantName(fruitName) end
+			if type(fruitName) == "string" and type(entry) == "table" then entries[fruitName] = { multiplier = tonumber(entry.multiplier) or 1, tier = tostring(entry.tier or "normal") } end
 		end
 		State.Stock.Entries = entries
 	end
