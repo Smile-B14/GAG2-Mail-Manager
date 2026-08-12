@@ -1,21 +1,27 @@
 # GAG2 Mail Manager
 
-Mail, collect, buy, and garden utility script for Grow a Garden 2.
+> One clean interface for your garden.
 
-## Use
+## Quick Start
 
-1. Join the game and wait for your inventory to load.
+1. Join Grow a Garden 2.
 2. Run `GAG2_Mail_Manager.luau`.
-3. Use the tabs in the UI.
+3. Open any tab and play.
 
-## Included
+## Features
 
-- Mail fruits, pets, seeds, and gear
-- Saved trusted recipients
-- Mail history and saved settings
-- Auto Collect and Auto Sell
-- Auto Buy
-- Anti-AFK and Public Anti-Steal
-- Fruit values, stock timer, icons, and rarity sorting
+| Tab | What it does |
+| --- | --- |
+| Mail | Send fruits, pets, seeds, and gear. |
+| Trusted | Save people for quick recipient selection. |
+| History | Search previous sends. |
+| Auto Collect | Collect selected produce automatically. |
+| Auto Sell | Sell eligible fruit automatically. |
+| Auto Buy | Buy selected seeds and gear automatically. |
+| Safety | Anti-AFK and Public Anti-Steal controls. |
 
-Re-run the script at any time to replace the old UI safely.
+### Extras
+
+- Fruit values, icons, rarity sorting, and stock timer
+- Saved settings
+- Clean replace when the script is run again
