@@ -1,64 +1,21 @@
-# Grow a Garden 2 Mail Manager
+# GAG2 Mail Manager
 
-Executor-side Luau mail interface for Grow a Garden 2, grounded in the game's mailbox, inventory, fruit-value, and Fruit Price Stock structures.
+Mail, collect, buy, and garden utility script for Grow a Garden 2.
 
-## Executor support
+## Use
 
-- Delta
-- Other executors that support standard Roblox `ModuleScript` requiring, Luau buffers, `loadstring`, and `game:HttpGet`
+1. Join the game and wait for your inventory to load.
+2. Run `GAG2_Mail_Manager.luau`.
+3. Use the tabs in the UI.
 
-## Usage
+## Included
 
-1. Join Grow a Garden 2 and wait for your inventory to load.
-2. Execute `GAG2_Mail_Manager.luau`.
-3. The script builds its plant/fruit catalog only from `ReplicatedStorage.Assets.Fruits`, `.Plants`, and `.Seeds`, yielding between small batches so startup does not freeze the game.
-4. Resolve a username, select grown fruits, pets, seeds, or gear, optionally enter a note, and send.
-5. In **Auto Collect**, select produce and set the threshold and above/below condition. Weight versus height is detected automatically from each live fruit or plant model.
-6. Optionally enable Auto Sell to sell newly collected, unfavorited fruit through the game's normal Sell All endpoint.
-7. In **Auto Buy**, select live Seed Shop and Gear Shop items. The first load enables Auto Buy and preselects all Super-rarity shop seeds, every sprinkler, Super Watering Can, Basic Pot, Trowel, and the game's exact basic can (`Common Watering Can`).
-8. Use the minus button to collapse the interface into a draggable **SB** bubble; tap the bubble to restore it.
-9. Press Right Shift to hide or show the interface.
+- Mail fruits, pets, seeds, and gear
+- Saved trusted recipients
+- Mail history and saved settings
+- Auto Collect and Auto Sell
+- Auto Buy
+- Anti-AFK and Public Anti-Steal
+- Fruit values, stock timer, icons, and rarity sorting
 
-Re-executing automatically stops the previous copy and removes orphaned same-name UI left by an interrupted run.
-
-## Features
-
-- Runtime catalog discovery only from the game's exact `Assets.Fruits`, `Assets.Plants`, and `Assets.Seeds` folders
-- Batched/yielding asset scans to reduce frame stalls
-- Replica-safe startup that reuses the game's already-loaded `PlayerStateClient` before attempting an executor-local module require
-- Live inventory refresh every second, reacquiring the current player replica and recovering automatically if one refresh fails
-- Exact live Tool-marker reconciliation for newly added seed, gear, and pet inventory entries and stack counts
-- Grown-fruit discovery from authoritative `Inventory.HarvestedFruits` entries plus exact game-marked `FruitProxyUtil` instances, using stable mailbox IDs
-- Pets come from authoritative `Inventory.Pets`; equipped and favorited pets are excluded
-- Favorited harvested fruit is excluded and removed from stale queues
-- Fruit mutation, weight, size multiplier, mutation multiplier, Fruit Price Stock multiplier, and live Sheckles value
-- Automatic selected-fruit total using K/M/B/T/Qa/Qi-style abbreviations
-- Seeds are always sent first in batches of up to 100,000 units; fruits, pets, and gears follow in that exact order in safe 20-unit batches
-- Temporary mailbox cooldown responses retry every five seconds without losing the remaining queue
-- Non-blocking mailbox response timeout so the UI cannot remain stuck on STOP forever
-- Inventory reconciliation after a missing/hung response to detect sends that the server accepted even when no response returned
-- STOP immediately cancels the local send state and ignores late responses
-- Search and Fruits / Pets / Seeds / Gears filters
-- Responsive five-tab inventory filter row that stays inside the panel at every UI scale
-- Draggable minimized bubble with swirl animation to and from the bubble's actual position
-- Responsive desktop/mobile scaling
-- Smooth milestone-based loading animation with a 0–100% progress line and Smile B credit
-- Smile B branding in the main header and `SB` minimized bubble
-- Default mail note: `Smile B Messenger`
-- Per-produce Auto Collect rules with persisted selection, automatically detected weight/height measurement, threshold, and above/below condition
-- Authoritative own-garden scanning using the game's `UserId`, `PlantId`, `FruitId`, `Age`, and `MaxAge` attributes
-- Exact game weight calculations in kilograms (the game value is already kg) plus rendered-height measurement for Bamboo and other whole plants
-- Persistent `Grab Mutated` toggle; mutated plants and fruit are skipped by default and collected only when explicitly enabled
-- Fast rate-limited harvest batches (up to 50 per pass) using the game's `Garden.CollectFruit` packet
-- Optional timeout-safe Auto Sell checks live inventory every three seconds using the game's `NPCS.SellAll` response; server-protected favorited fruit is not sold
-- Persistent Auto Buy selections for the live Seed Shop and Gear Shop catalogs
-- Durable on-disk settings for Compose, Auto Collect, Auto Buy, Safety, last tab, and trusted recipients
-- One-click trusted-recipient saving and selection
-- First-load defaults for all shop-stocked Super seeds, all sprinklers, Super Watering Can, Basic Pot, Trowel, and Common Watering Can
-- Stock-aware buying through the exact `PurchaseSeed` and `PurchaseGear` packets, subtracting authoritative per-player `PurchasedThisRestock` counts and checking live Sheckles
-- Live in-game Seed Shop and Gear Shop restock countdowns driven by their `UnixNextRestock` values and the game's synchronized server clock
-- Single-touch-safe minimized bubble dragging and restoration; unrelated touches cannot move the bubble
-- Item icons and searchable mail history, with an optimized 100-entry view and indefinite on-disk retention
-- Live Fruit Price Stock refresh countdown
-
-The game server still validates ownership and mailbox requests. The script does not invent items or recipient inventory.
+Re-run the script at any time to replace the old UI safely.
