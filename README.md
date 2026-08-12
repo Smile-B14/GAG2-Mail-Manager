@@ -13,7 +13,7 @@ Executor-side Luau mail interface for Grow a Garden 2, grounded in the game's ma
 2. Execute `GAG2_Mail_Manager.luau`.
 3. The script builds its plant/fruit catalog only from `ReplicatedStorage.Assets.Fruits`, `.Plants`, and `.Seeds`, yielding between small batches so startup does not freeze the game.
 4. Resolve a username, select grown fruits, pets, seeds, or gear, optionally enter a note, and send.
-5. In **Auto Collect**, select produce, choose a weight (kg) or height (studs) threshold and whether to collect at/above or at/below it, then enable Auto Collect. Bamboo defaults to height.
+5. In **Auto Collect**, select produce and set the threshold and above/below condition. Weight versus height is detected automatically from each live fruit or plant model.
 6. Optionally enable Auto Sell to sell newly collected, unfavorited fruit through the game's normal Sell All endpoint.
 7. In **Auto Buy**, select live Seed Shop and Gear Shop items. The first load enables Auto Buy and preselects all Super-rarity shop seeds, every sprinkler, Super Watering Can, Basic Pot, Trowel, and the game's exact basic can (`Common Watering Can`).
 8. Use the minus button to collapse the interface into a draggable **SB** bubble; tap the bubble to restore it.
@@ -33,7 +33,8 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Favorited harvested fruit is excluded and removed from stale queues
 - Fruit mutation, weight, size multiplier, mutation multiplier, Fruit Price Stock multiplier, and live Sheckles value
 - Automatic selected-fruit total using K/M/B/T/Qa/Qi-style abbreviations
-- Large queued sends have no fixed client-side queue cap and are submitted in one mailbox request rather than the old artificial 20-unit client batching
+- Seeds are always sent first in batches of up to 100,000 units; fruits, pets, and gears follow in that exact order in safe 20-unit batches
+- Temporary mailbox cooldown responses retry every five seconds without losing the remaining queue
 - Non-blocking mailbox response timeout so the UI cannot remain stuck on STOP forever
 - Inventory reconciliation after a missing/hung response to detect sends that the server accepted even when no response returned
 - STOP immediately cancels the local send state and ignores late responses
@@ -44,18 +45,20 @@ Re-executing automatically stops the previous copy and removes orphaned same-nam
 - Smooth milestone-based loading animation with a 0–100% progress line and Smile B credit
 - Smile B branding in the main header and `SB` minimized bubble
 - Default mail note: `Smile B Messenger`
-- Per-produce Auto Collect rules with persisted selection, weight/height metric, threshold, and above/below condition
+- Per-produce Auto Collect rules with persisted selection, automatically detected weight/height measurement, threshold, and above/below condition
 - Authoritative own-garden scanning using the game's `UserId`, `PlantId`, `FruitId`, `Age`, and `MaxAge` attributes
 - Exact game weight calculations in kilograms (the game value is already kg) plus rendered-height measurement for Bamboo and other whole plants
 - Persistent `Grab Mutated` toggle; mutated plants and fruit are skipped by default and collected only when explicitly enabled
 - Fast rate-limited harvest batches (up to 50 per pass) using the game's `Garden.CollectFruit` packet
 - Optional timeout-safe Auto Sell checks live inventory every three seconds using the game's `NPCS.SellAll` response; server-protected favorited fruit is not sold
 - Persistent Auto Buy selections for the live Seed Shop and Gear Shop catalogs
+- Durable on-disk settings for Compose, Auto Collect, Auto Buy, Safety, last tab, and trusted recipients
+- One-click trusted-recipient saving and selection
 - First-load defaults for all shop-stocked Super seeds, all sprinklers, Super Watering Can, Basic Pot, Trowel, and Common Watering Can
 - Stock-aware buying through the exact `PurchaseSeed` and `PurchaseGear` packets, subtracting authoritative per-player `PurchasedThisRestock` counts and checking live Sheckles
 - Live in-game Seed Shop and Gear Shop restock countdowns driven by their `UnixNextRestock` values and the game's synchronized server clock
 - Single-touch-safe minimized bubble dragging and restoration; unrelated touches cannot move the bubble
-- Item icons and local mail history
+- Item icons and searchable mail history, with an optimized 100-entry view and indefinite on-disk retention
 - Live Fruit Price Stock refresh countdown
 
 The game server still validates ownership and mailbox requests. The script does not invent items or recipient inventory.
